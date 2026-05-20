@@ -1,43 +1,42 @@
-"""Skill bundles — aliases that load multiple skills under one slash command.
+"""
+技能包（Skill Bundles）模块
 
-A skill bundle is a small YAML file that names a set of skills to load
-together. Invoking ``/<bundle-name>`` from the CLI or gateway loads every
-referenced skill's full content into a single user message, the same way
-``/<skill-name>`` does — but for N skills at once.
+技能包是一种别名机制，可以在一个斜杠命令下加载多个技能。
 
-Storage
--------
-Bundles live in ``~/.hermes/skill-bundles/*.yaml`` (and the equivalent
-profile-aware directory under ``HERMES_HOME``). Each file looks like::
+技能包是一个小型 YAML 文件，定义了一组要一起加载的技能。从 CLI 或网关调用
+``/包名`` 会将每个引用技能的完整内容加载到一条用户消息中，就像 ``/技能名`` 那样
+——但可以一次性加载 N 个技能。
+
+存储位置
+--------
+技能包存储在 ``~/.hermes/skill-bundles/*.yaml``（以及 HERMES_HOME 下的等效配置文件目录）。
+每个文件格式如下：
 
     name: backend-dev
-    description: Backend feature work — code review, testing, PR workflow.
+    description: 后端功能开发 — 代码审查、测试、PR 工作流
     skills:
       - github-code-review
       - test-driven-development
       - github-pr-workflow
     instruction: |
-      Optional extra guidance to inject above the skill bodies.
+      可选的额外指导，会注入到技能内容上方
 
-The file's stem is treated as a fallback name when ``name:`` is absent, so
-dropping a YAML into the directory is enough to register a new bundle.
+当缺少 ``name:`` 字段时，文件名将作为后备名称，因此只需将 YAML 文件放入目录即可注册新包。
 
-Conflict resolution
--------------------
-If a bundle and a skill share the same slash name, the bundle wins. The
-slash command dispatch checks bundles first, then falls back to skills.
-This is the intended behavior — a user who names a bundle ``research``
-explicitly wants ``/research`` to mean their bundle, not whatever skill
-happens to share the slug.
+冲突解决
+--------
+如果技能包和技能共享同一个斜杠命令名称，技能包优先。斜杠命令调度先检查技能包，
+然后回退到技能。这是预期的行为——将技能包命名为 ``research`` 的用户明确希望
+``/research`` 表示他们的技能包，而不是恰好共享同一名称的任何技能。
 
-Public API
-----------
-- :func:`get_skill_bundles` — return ``{"/slug": bundle_info}``
-- :func:`resolve_bundle_command_key` — map a user-typed command to its slug
-- :func:`build_bundle_invocation_message` — produce the full user message
-- :func:`reload_bundles` — re-scan disk and return a diff
-- :func:`list_bundles` — return rich info for display (``hermes bundles``)
-- :func:`save_bundle` / :func:`delete_bundle` — file-level operations
+公共 API
+--------
+- :func:`get_skill_bundles` — 返回 ``{"/slug": bundle_info}``
+- :func:`resolve_bundle_command_key` — 将用户输入的命令映射到其规范化名称
+- :func:`build_bundle_invocation_message` — 生成完整的用户消息
+- :func:`reload_bundles` — 重新扫描磁盘并返回差异
+- :func:`list_bundles` — 返回用于显示的完整信息（``hermes bundles``）
+- :func:`save_bundle` / :func:`delete_bundle` — 文件级操作
 """
 
 from __future__ import annotations

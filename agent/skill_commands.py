@@ -1,7 +1,15 @@
-"""Shared slash command helpers for skills.
+"""
+技能斜杠命令共享模块
 
-Shared between CLI (cli.py) and gateway (gateway/run.py) so both surfaces
-can invoke skills via /skill-name commands.
+提供技能斜杠命令的共享辅助函数，在 CLI (cli.py) 和网关 (gateway/run.py) 之间共享，
+使两个界面都可以通过 /技能名 命令调用技能。
+
+主要功能：
+- 技能命令扫描和缓存
+- 技能负载加载和预处理
+- 技能调用消息构建
+- 预加载技能提示构建
+- 技能重新加载
 """
 
 import json
@@ -28,16 +36,18 @@ _SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
 
 
 def _resolve_skill_commands_platform() -> Optional[str]:
-    """Return the current platform scope used for disabled-skill filtering.
+    """
+    返回用于禁用技能过滤的当前平台范围。
 
-    Used to detect when the active platform has shifted so
-    :func:`get_skill_commands` can drop a stale cache that was populated
-    for a different platform's ``skills.platform_disabled`` view (#14536).
+    用于检测活动平台是否已更改，以便 :func:`get_skill_commands` 可以丢弃
+    为不同平台的 ``skills.platform_disabled`` 视图填充的过期缓存 (#14536)。
 
-    Resolves from (in order) ``HERMES_PLATFORM`` env var and
-    ``HERMES_SESSION_PLATFORM`` from the gateway session context. Returns
-    ``None`` when no platform scope is active (e.g. classic CLI, RL
-    rollouts, standalone scripts).
+    按顺序从以下位置解析：``HERMES_PLATFORM`` 环境变量和网关会话上下文中的
+    ``HERMES_SESSION_PLATFORM``。当没有活动平台范围时返回 ``None``
+    （例如经典 CLI、RL 部署、独立脚本）。
+
+    Returns:
+        Optional[str] - 当前平台名称或 None
     """
     try:
         from gateway.session_context import get_session_env
@@ -51,7 +61,16 @@ def _resolve_skill_commands_platform() -> Optional[str]:
     return resolved_platform or None
 
 def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:
-    """Load a skill by name/path and return (loaded_payload, skill_dir, display_name)."""
+    """
+    通过名称/路径加载技能并返回 (loaded_payload, skill_dir, display_name)。
+
+    Args:
+        skill_identifier: 技能标识符（名称或路径）
+        task_id: 可选的任务 ID
+
+    Returns:
+        (loaded_payload, skill_dir, display_name) 元组，或 None（如果加载失败）
+    """
     raw_identifier = (skill_identifier or "").strip()
     if not raw_identifier:
         return None
@@ -119,12 +138,16 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
 
 
 def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None:
-    """Resolve and inject skill-declared config values into the message parts.
+    """
+    解析技能声明的配置值并注入到消息部分中。
 
-    If the loaded skill's frontmatter declares ``metadata.hermes.config``
-    entries, their current values (from config.yaml or defaults) are appended
-    as a ``[Skill config: ...]`` block so the agent knows the configured values
-    without needing to read config.yaml itself.
+    如果加载的技能的前置元数据声明了 ``metadata.hermes.config`` 条目，
+    它们的当前值（来自 config.yaml 或默认值）会作为 ``[Skill config: ...]``
+    块追加，这样 Agent 就可以知道配置值而无需读取 config.yaml 本身。
+
+    Args:
+        loaded_skill: 加载的技能字典
+        parts: 消息部分列表，配置块会追加到此列表
     """
     try:
         from agent.skill_utils import (
@@ -165,7 +188,28 @@ def _build_skill_message(
     runtime_note: str = "",
     session_id: str | None = None,
 ) -> str:
-    """Format a loaded skill into a user/system message payload."""
+    """
+    将加载的技能格式化为用户/系统消息负载。
+
+    执行以下处理步骤：
+    1. 模板变量替换和内联 Shell 扩展
+    2. 注入技能目录路径
+    3. 注入配置值
+    4. 添加设置说明
+    5. 列出支持文件
+    6. 添加用户指令
+
+    Args:
+        loaded_skill: 加载的技能字典
+        skill_dir: 技能目录路径
+        activation_note: 激活说明文本
+        user_instruction: 用户提供的指令
+        runtime_note: 运行时说明
+        session_id: 会话 ID
+
+    Returns:
+        str - 格式化后的完整消息内容
+    """
     from tools.skills_tool import SKILLS_DIR
 
     content = str(loaded_skill.get("content") or "")
@@ -261,10 +305,14 @@ def _build_skill_message(
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
-    """Scan ~/.hermes/skills/ and return a mapping of /command -> skill info.
+    """
+    扫描 ~/.hermes/skills/ 并返回 /命令 -> 技能信息的映射。
+
+    扫描顺序：先本地目录，然后是外部目录。
+    会跳过：不兼容平台的技能、禁用的技能、重复名称的技能。
 
     Returns:
-        Dict mapping "/skill-name" to {name, description, skill_md_path, skill_dir}.
+        Dict[str, Dict[str, Any]] - 映射 "/技能名" 到 {name, description, skill_md_path, skill_dir}
     """
     global _skill_commands, _skill_commands_platform
     _skill_commands_platform = _resolve_skill_commands_platform()

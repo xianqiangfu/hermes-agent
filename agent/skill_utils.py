@@ -1,8 +1,18 @@
-"""Lightweight skill metadata utilities shared by prompt_builder and skills_tool.
+"""
+技能元数据工具模块
 
-This module intentionally avoids importing the tool registry, CLI config, or any
-heavy dependency chain.  It is safe to import at module level without triggering
-tool registration or provider resolution.
+提供轻量级的技能元数据工具函数，供 prompt_builder 和 skills_tool 共享使用。
+
+本模块有意避免导入工具注册表、CLI 配置或任何重型依赖链。可以安全地在模块级别导入，
+不会触发工具注册或提供程序解析。
+
+主要功能：
+- YAML 前置元数据解析
+- 平台兼容性检查
+- 禁用技能管理
+- 外部技能目录管理
+- 技能配置变量提取
+- 技能文件迭代
 """
 
 import logging
@@ -32,7 +42,15 @@ _yaml_load_fn = None
 
 
 def yaml_load(content: str):
-    """Parse YAML with lazy import and CSafeLoader preference."""
+    """
+    解析 YAML 内容，使用懒加载和 CSafeLoader 优先策略。
+
+    Args:
+        content: YAML 格式的字符串内容
+
+    Returns:
+        解析后的 Python 对象
+    """
     global _yaml_load_fn
     if _yaml_load_fn is None:
         import yaml
@@ -50,13 +68,17 @@ def yaml_load(content: str):
 
 
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
-    """Parse YAML frontmatter from a markdown string.
+    """
+    从 Markdown 字符串中解析 YAML 前置元数据。
 
-    Uses yaml with CSafeLoader for full YAML support (nested metadata, lists)
-    with a fallback to simple key:value splitting for robustness.
+    使用支持完整 YAML 功能的 CSafeLoader（嵌套元数据、列表），
+    同时提供简单键值对解析的后备方案以增强健壮性。
+
+    Args:
+        content: 包含 YAML 前置元数据的 Markdown 字符串
 
     Returns:
-        (frontmatter_dict, remaining_body)
+        (frontmatter_dict, remaining_body) - 元数据字典和剩余正文内容
     """
     frontmatter: Dict[str, Any] = {}
     body = content
@@ -90,16 +112,21 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
 
 
 def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
-    """Return True when the skill is compatible with the current OS.
+    """
+    检查技能是否与当前操作系统兼容。
 
-    Skills declare platform requirements via a top-level ``platforms`` list
-    in their YAML frontmatter::
+    技能通过 YAML 前置元数据中的顶级 ``platforms`` 列表声明平台要求：
 
-        platforms: [macos]          # macOS only
-        platforms: [macos, linux]   # macOS and Linux
+        platforms: [macos]          # 仅支持 macOS
+        platforms: [macos, linux]   # 支持 macOS 和 Linux
 
-    If the field is absent or empty the skill is compatible with **all**
-    platforms (backward-compatible default).
+    如果该字段不存在或为空，技能与**所有**平台兼容（向后兼容的默认行为）。
+
+    Args:
+        frontmatter: 技能的元数据字典
+
+    Returns:
+        bool - 技能是否与当前平台兼容
     """
     platforms = frontmatter.get("platforms")
     if not platforms:
@@ -119,16 +146,18 @@ def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
 
 
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
-    """Read disabled skill names from config.yaml.
+    """
+    从 config.yaml 读取禁用的技能名称列表。
 
     Args:
-        platform: Explicit platform name (e.g. ``"telegram"``).  When
-            *None*, resolves from ``HERMES_PLATFORM`` or
-            ``HERMES_SESSION_PLATFORM`` env vars.  Falls back to the
-            global disabled list when no platform is determined.
+        platform: 显式平台名称（例如 ``"telegram"``）。当为 *None* 时，
+            从 ``HERMES_PLATFORM`` 或 ``HERMES_SESSION_PLATFORM`` 环境变量解析。
+            当无法确定平台时，回退到全局禁用列表。
 
-    Reads the config file directly (no CLI config imports) to stay
-    lightweight.
+    直接读取配置文件（不导入 CLI 配置）以保持轻量。
+
+    Returns:
+        Set[str] - 禁用的技能名称集合
     """
     config_path = get_config_path()
     if not config_path.exists():
@@ -185,16 +214,18 @@ def _external_dirs_cache_clear() -> None:
 
 
 def get_external_skills_dirs() -> List[Path]:
-    """Read ``skills.external_dirs`` from config.yaml and return validated paths.
+    """
+    从 config.yaml 读取 ``skills.external_dirs`` 并返回验证后的路径列表。
 
-    Each entry is expanded (``~`` and ``${VAR}``) and resolved to an absolute
-    path.  Only directories that actually exist are returned.  Duplicates and
-    paths that resolve to the local ``~/.hermes/skills/`` are silently skipped.
+    每个条目都会被扩展（``~`` 和 ``${VAR}``）并解析为绝对路径。
+    只返回实际存在的目录。重复项和解析到本地 ``~/.hermes/skills/`` 的路径会被静默跳过。
 
-    Cached in-process, keyed on ``config.yaml`` mtime — the function is
-    called once per skill during banner / tool-registry scans, and YAML
-    parsing a non-trivial config dominates ``hermes`` cold-start time
-    when the cache is absent.
+    使用进程内缓存，以 ``config.yaml`` 的 mtime 作为键——这个函数在
+    横幅/工具注册表扫描期间每个技能调用一次，当缓存不存在时，
+    YAML 解析非平凡配置会占据 ``hermes`` 冷启动时间的主要部分。
+
+    Returns:
+        List[Path] - 外部技能目录的 Path 对象列表
     """
     config_path = get_config_path()
     if not config_path.exists():
@@ -271,10 +302,14 @@ def get_external_skills_dirs() -> List[Path]:
 
 
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """
+    返回所有技能目录：本地 ``~/.hermes/skills/`` 优先，然后是外部目录。
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    本地目录总是在第一位（并且总是包含，即使它还不存在——调用者处理这种情况）。
+    外部目录按配置顺序跟随。
+
+    Returns:
+        List[Path] - 所有技能目录的 Path 对象列表
     """
     dirs = [get_skills_dir()]
     dirs.extend(get_external_skills_dirs())

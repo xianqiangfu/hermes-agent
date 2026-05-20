@@ -1,4 +1,12 @@
-"""Shared SKILL.md preprocessing helpers."""
+"""
+SKILL.md 共享预处理模块
+
+提供技能内容的预处理功能，包括：
+- 模板变量替换（${HERMES_SKILL_DIR}、${HERMES_SESSION_ID}）
+- 内联 Shell 命令执行（!`command`）
+
+这些功能可以在配置中启用或禁用。
+"""
 
 import logging
 import re
@@ -21,7 +29,12 @@ _INLINE_SHELL_MAX_OUTPUT = 4000
 
 
 def load_skills_config() -> dict:
-    """Load the ``skills`` section of config.yaml (best-effort)."""
+    """
+    加载 config.yaml 的 ``skills`` 部分（尽力而为）。
+
+    Returns:
+        dict - 技能配置字典，如果加载失败则返回空字典
+    """
     try:
         from hermes_cli.config import load_config
 
@@ -39,10 +52,18 @@ def substitute_template_vars(
     skill_dir: Path | None,
     session_id: str | None,
 ) -> str:
-    """Replace ${HERMES_SKILL_DIR} / ${HERMES_SESSION_ID} in skill content.
+    """
+    替换技能内容中的 ${HERMES_SKILL_DIR} / ${HERMES_SESSION_ID} 模板变量。
 
-    Only substitutes tokens for which a concrete value is available --
-    unresolved tokens are left in place so the author can spot them.
+    只替换那些有具体值可用的标记——未解析的标记会保留在原位，以便作者可以发现它们。
+
+    Args:
+        content: 技能内容字符串
+        skill_dir: 技能目录路径
+        session_id: 会话 ID
+
+    Returns:
+        str - 替换后的内容
     """
     if not content:
         return content
@@ -61,10 +82,19 @@ def substitute_template_vars(
 
 
 def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
-    """Execute a single inline-shell snippet and return its stdout (trimmed).
+    """
+    执行单个内联 Shell 片段并返回其标准输出（去除尾部空白）。
 
-    Failures return a short ``[inline-shell error: ...]`` marker instead of
-    raising, so one bad snippet can't wreck the whole skill message.
+    失败时返回简短的 ``[inline-shell error: ...]`` 标记而不是抛出异常，
+    这样一个糟糕的片段不会破坏整个技能消息。
+
+    Args:
+        command: 要执行的 Shell 命令
+        cwd: 工作目录
+        timeout: 超时时间（秒）
+
+    Returns:
+        str - 命令输出或错误标记
     """
     try:
         completed = subprocess.run(
@@ -103,10 +133,18 @@ def expand_inline_shell(
     skill_dir: Path | None,
     timeout: int,
 ) -> str:
-    """Replace every !`cmd` snippet in ``content`` with its stdout.
+    """
+    将 ``content`` 中的每个 !`cmd` 片段替换为其标准输出。
 
-    Runs each snippet with the skill directory as CWD so relative paths in
-    the snippet work the way the author expects.
+    使用技能目录作为工作目录运行每个片段，这样片段中的相对路径能按作者预期工作。
+
+    Args:
+        content: 技能内容字符串
+        skill_dir: 技能目录路径
+        timeout: 超时时间（秒）
+
+    Returns:
+        str - 替换后的内容
     """
     if "!`" not in content:
         return content
@@ -126,7 +164,22 @@ def preprocess_skill_content(
     session_id: str | None = None,
     skills_cfg: dict | None = None,
 ) -> str:
-    """Apply configured SKILL.md template and inline-shell preprocessing."""
+    """
+    应用配置的 SKILL.md 模板和内联 Shell 预处理。
+
+    根据配置执行：
+    1. 模板变量替换（如果启用）
+    2. 内联 Shell 扩展（如果启用）
+
+    Args:
+        content: 技能内容字符串
+        skill_dir: 技能目录路径
+        session_id: 会话 ID
+        skills_cfg: 技能配置字典，如果为 None 则从配置文件加载
+
+    Returns:
+        str - 预处理后的内容
+    """
     if not content:
         return content
 
