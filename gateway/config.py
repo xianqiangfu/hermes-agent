@@ -8,6 +8,66 @@ Handles loading and validating configuration for:
 - Delivery preferences
 """
 
+# =============================================================================
+# 网关配置模块 (gateway/config.py)
+# =============================================================================
+#
+# 本模块是 Hermes 消息网关的配置管理中心，负责加载、验证和管理网关的所有配置项。
+#
+# 【核心数据结构】
+#
+#   - Platform 枚举：支持的 messaging 平台标识。内置平台拥有显式枚举成员，
+#     插件平台通过 `_missing_()` 方法动态创建伪成员，无需修改枚举定义。
+#     动态成员缓存在 `_value2member_map_` 中，保证身份稳定性
+#     （即 `Platform("irc") is Platform("irc")` 成立）。
+#
+#   - GatewayConfig：网关主配置类，管理平台配置映射、会话重置策略、
+#     流式传输配置、会话存储修剪等。
+#
+#   - PlatformConfig：单个平台的配置，包含启用状态、token、主频道、
+#     回复模式、重启通知开关和平台特定 extra 字典。
+#
+#   - HomeChannel：平台主频道定义，当 cron 任务指定 `deliver="telegram"`
+#     而未指定具体 chat_id 时，消息发送到该主频道。
+#
+#   - SessionResetPolicy：会话重置策略，支持 daily（每日定时）、
+#     idle（空闲超时）、both（任一触发）、none（永不自动重置）四种模式。
+#
+#   - StreamingConfig：流式传输配置，支持 auto/draft/edit/off 四种传输模式，
+#     控制编辑间隔、缓冲阈值和光标样式。
+#
+# 【配置加载优先级】（从高到低）
+#
+#   1. 环境变量（_apply_env_overrides 处理）
+#   2. ~/.hermes/config.yaml（YAML 配置文件）
+#   3. ~/.hermes/gateway.json（兼容旧版）
+#   4. 内置默认值
+#
+# 【平台连接检查】
+#
+#   _PLATFORM_CONNECTED_CHECKERS 字典为每个平台定义连接状态判断逻辑：
+#   - 通用平台（Telegram、Discord 等）：检查 token 或 api_key
+#   - 特殊平台（WhatsApp、Signal 等）：检查 extra 字典中的特定字段
+#   - API 类平台（api_server、webhook）：始终视为已连接
+#
+# 【辅助函数】
+#
+#   - _coerce_bool / _coerce_float / _coerce_int：类型强制转换，处理 YAML/JSON
+#     中可能出现的多种类型表示
+#   - _normalize_unauthorized_dm_behavior / _normalize_notice_delivery：
+#     规范化枚举类配置值
+#   - _ensure_platform_extra_dict：安全获取或创建平台配置的 extra 字典
+#
+# 【与其它模块的交互】
+#
+#   - gateway/session.py：使用 Platform 枚举和 SessionResetPolicy
+#   - gateway/delivery.py：使用 Platform 枚举和 GatewayConfig
+#   - gateway/run.py：通过 load_gateway_config() 加载配置，
+#     通过 get_connected_platforms() 判断已连接平台
+#   - gateway/platform_registry.py：插件平台通过 Platform._missing_() 动态注册
+#   - gateway/stream_consumer.py：使用 StreamingConfig 中的默认值
+# =============================================================================
+
 import logging
 import os
 import json

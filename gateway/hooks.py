@@ -19,6 +19,60 @@ Events:
 Errors in hooks are caught and logged but never block the main pipeline.
 """
 
+# =============================================================================
+# 事件钩子模块 (gateway/hooks.py)
+# =============================================================================
+#
+# 本模块实现了一个轻量级的事件驱动系统，在网关生命周期的关键节点触发自定义处理逻辑。
+#
+# 【核心类 — HookRegistry】
+#
+#   HookRegistry 负责钩子的发现、加载和触发：
+#
+#   - discover_and_load()：扫描 ~/.hermes/hooks/ 目录，加载所有有效的钩子
+#     1. 首先注册内置钩子（_register_builtin_hooks，当前为空，预留扩展点）
+#     2. 遍历钩子目录，每个目录必须包含 HOOK.yaml 和 handler.py
+#     3. 动态加载 handler.py 模块（使用 importlib），在 exec_module 前注册
+#        到 sys.modules 以支持 Pydantic/dataclasses 的前向引用解析
+#     4. 查找模块中的 handle 函数，为每个声明的事件注册处理器
+#
+#   - emit(event_type, context)：触发事件，调用所有匹配的处理器，忽略返回值
+#     支持同步和异步处理器，错误被捕获并记录，不阻塞主管道
+#
+#   - emit_collect(event_type, context)：触发事件，收集所有非 None 返回值
+#     用于决策类钩子（如 command:<name> 策略的允许/拒绝/重写）
+#
+# 【通配符匹配】
+#
+#   注册为 "command:*" 的处理器会匹配任何 "command:..." 事件。
+#   精确匹配优先触发，然后是通配符匹配。
+#   注意：注册为 "agent" 的处理器不会匹配 "agent:start"——只支持
+#   显式通配符（带 ":*" 后缀）。
+#
+# 【钩子目录结构】
+#
+#   ~/.hermes/hooks/
+#   ├── my_hook/
+#   │   ├── HOOK.yaml        # 元数据（name, description, events 列表）
+#   │   └── handler.py       # 处理函数：def handle(event_type, context)
+#   └── another_hook/
+#       ├── HOOK.yaml
+#       └── handler.py
+#
+# 【错误处理策略】
+#
+#   钩子处理器中的异常被捕获并打印到 stdout，绝不阻塞主管道。
+#   加载失败的钩子会被跳过并记录错误信息。
+#   模块加载失败时，已注册到 sys.modules 的条目会被清除。
+#
+# 【与其它模块的交互】
+#
+#   - gateway/run.py：在网关启动时调用 discover_and_load()，
+#     在消息处理各阶段调用 emit() 触发事件
+#   - gateway/builtin_hooks/：内置钩子（当前为空，通过
+#     _register_builtin_hooks 扩展点注册）
+# =============================================================================
+
 import asyncio
 import importlib.util
 import sys

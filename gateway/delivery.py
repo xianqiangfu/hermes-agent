@@ -8,6 +8,51 @@ Routes messages to the appropriate destination based on:
 - Local (always saved to files)
 """
 
+# =============================================================================
+# 消息投递模块 (gateway/delivery.py)
+# =============================================================================
+#
+# 本模块负责将 cron 任务输出和 Agent 响应路由到正确的目标位置。
+#
+# 【核心数据结构】
+#
+#   - DeliveryTarget：投递目标，表示消息应发送到何处。
+#     支持的目标格式：
+#       - "origin"          → 回到消息来源
+#       - "local"           → 保存到本地文件
+#       - "telegram"        → Telegram 主频道（HomeChannel）
+#       - "telegram:123456" → Telegram 指定聊天
+#       - "telegram:123456:789" → Telegram 指定线程
+#
+#     DeliveryTarget.parse() 方法负责将字符串解析为结构化对象，
+#     支持平台名称大小写不敏感，chat_id/thread_id 保留原始大小写。
+#
+#   - DeliveryRouter：消息投递路由器，负责解析投递目标并分派消息到
+#    正确的平台适配器。
+#
+# 【DeliveryRouter 工作流程】
+#
+#   1. 初始化时接收 GatewayConfig 和平台适配器映射
+#   2. deliver() 方法遍历所有目标，逐一投递：
+#      - Platform.LOCAL → _deliver_local()：保存为 Markdown 文件
+#      - 其它平台 → _deliver_to_platform()：通过适配器发送
+#   3. 超长内容（>4000 字符）自动截断，完整输出保存到本地文件
+#
+# 【内容截断机制】
+#
+#   当投递到平台的内容超过 MAX_PLATFORM_OUTPUT (4000) 字符时：
+#   - 完整内容保存到 ~/.hermes/cron/output/ 目录
+#   - 截断内容附加提示信息，告知用户完整输出的保存路径
+#   - 保留前 TRUNCATED_VISIBLE (3800) 字符的可读内容
+#
+# 【与其它模块的交互】
+#
+#   - gateway/config.py：使用 Platform 枚举和 GatewayConfig
+#   - gateway/session.py：使用 SessionSource 确定消息来源
+#   - cron/scheduler.py：调用 DeliveryRouter 投递 cron 任务结果
+#   - 平台适配器：通过 adapters 映射获取适配器实例，调用 send() 方法
+# =============================================================================
+
 import logging
 from pathlib import Path
 from datetime import datetime

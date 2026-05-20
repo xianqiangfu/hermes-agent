@@ -48,10 +48,12 @@
 ### 关键设计原则
 
 1. **统一接口**：所有平台适配器继承 `BasePlatformAdapter`，实现相同的消息发送接口
-2. **平台无关**：网关核心逻辑不依赖具体平台，易于扩展新平台
-3. **持久化存储**：会话和消息持久化到 SQLite 数据库和 JSONL 文件
-4. **流式传输**：支持实时流式输出，提升用户体验
-5. **多用户隔离**：支持群聊/频道中的用户会话隔离
+2. **平台无关**：网关核心逻辑不依赖具体平台，通过 `PlatformRegistry` 实现插件式扩展
+3. **动态枚举**：`Platform` 枚举支持运行时动态添加插件平台（通过 `_missing_` 机制），无需修改核心代码
+4. **持久化存储**：会话和消息持久化到 SQLite 数据库和 JSONL 文件
+5. **流式传输**：支持实时流式输出（编辑模式和原生草稿模式），提升用户体验
+6. **多用户隔离**：支持群聊/频道中的用户会话隔离
+7. **任务安全**：使用 `contextvars.ContextVar` 实现并发消息处理的会话状态隔离
 
 ## 核心组件
 
@@ -651,6 +653,237 @@ elif context.source.platform == Platform.MYSERVICE:
         "Support custom features..."
     )
 ```
+
+## 辅助模块
+
+### HookRegistry — 事件钩子系统
+
+**文件位置**: `gateway/hooks.py`
+
+事件钩子系统提供轻量级的事件驱动机制，在网关生命周期的关键节点触发自定义处理逻辑。
+
+**支持的事件类型**：
+
+| 事件 | 触发时机 |
+|------|----------|
+| `gateway:startup` | 网关进程启动 |
+| `session:start` | 新会话创建（首次消息） |
+| `session:end` | 会话结束（用户执行 /new 或 /reset） |
+| `session:reset` | 会话重置完成 |
+| `agent:start` | Agent 开始处理消息 |
+| `agent:step` | 工具调用循环中的每一步 |
+| `agent:end` | Agent 完成处理 |
+| `command:*` | 任意斜杠命令（通配符匹配） |
+
+**钩子发现机制**：扫描 `~/.hermes/hooks/` 目录，每个钩子子目录包含：
+- `HOOK.yaml`：元数据（名称、描述、事件列表）
+- `handler.py`：处理函数（支持同步和异步）
+
+```python
+from gateway.hooks import HookRegistry
+
+registry = HookRegistry()
+registry.discover_and_load()
+
+# 触发事件（忽略返回值）
+await registry.emit("agent:start", {"platform": "telegram", ...})
+
+# 触发事件（收集返回值，用于决策类钩子）
+results = await registry.emit_collect("command:reset", context)
+```
+
+### PlatformRegistry — 平台注册中心
+
+**文件位置**: `gateway/platform_registry.py`
+
+允许平台适配器（内置和插件）自注册，网关无需硬编码 if/elif 链即可发现和实例化适配器。
+
+**插件端使用**：
+
+```python
+from gateway.platform_registry import platform_registry, PlatformEntry
+
+platform_registry.register(PlatformEntry(
+    name="irc",
+    label="IRC",
+    adapter_factory=lambda cfg: IRCAdapter(cfg),
+    check_fn=check_requirements,
+    validate_config=lambda cfg: bool(cfg.extra.get("server")),
+    required_env=["IRC_SERVER"],
+    install_hint="pip install irc",
+))
+```
+
+**网关端使用**：
+
+```python
+adapter = platform_registry.create_adapter("irc", platform_config)
+```
+
+**PlatformEntry 关键属性**：
+
+| 属性 | 用途 |
+|------|------|
+| `name` | 配置标识符（如 "irc"） |
+| `label` | 人类可读名称（如 "IRC"） |
+| `adapter_factory` | 适配器工厂函数 |
+| `check_fn` | 依赖可用性检查 |
+| `validate_config` | 配置验证 |
+| `env_enablement_fn` | 环境变量自动启用 |
+| `apply_yaml_config_fn` | YAML 配置桥接 |
+| `standalone_sender_fn` | 独立进程消息发送 |
+| `cron_deliver_env_var` | Cron 投递环境变量 |
+
+### GatewayStreamConsumer — 流式传输消费器
+
+**文件位置**: `gateway/stream_consumer.py`
+
+将同步的 Agent 流式回调桥接到异步的平台消息递送。
+
+**工作流程**：
+1. Agent 在工作线程中同步调用 `stream_delta_callback(text)`
+2. `on_delta()` 接收增量文本（线程安全，同步）
+3. 通过 `queue.Queue` 队列传递到 asyncio 任务
+4. 异步 `run()` 任务缓冲、限速、逐步编辑平台消息
+
+**传输模式**：
+
+| 模式 | 说明 |
+|------|------|
+| `auto` | 优先使用原生草稿流式（Telegram Bot API 9.5+），不支持时回退到编辑模式 |
+| `draft` | 显式请求原生草稿流式 |
+| `edit` | 渐进式 editMessageText（默认/传统行为） |
+| `off` | 禁用流式传输 |
+
+### SessionContext — 会话上下文变量
+
+**文件位置**: `gateway/session_context.py`
+
+使用 Python `contextvars.ContextVar` 替代 `os.environ` 实现任务级会话状态隔离。
+
+**设计动机**：网关通过 `asyncio` 并发处理消息。旧代码使用 `os.environ` 存储会话状态，导致并发消息之间状态互相覆盖。`ContextVar` 值是任务局部的，每个 asyncio 任务获得独立副本，避免干扰。
+
+**公共接口**：
+
+```python
+from gateway.session_context import get_session_env, set_session_vars, clear_session_vars
+
+# 读取会话环境变量（兼容旧代码）
+platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+
+# 设置会话变量（任务局部）
+set_session_vars(platform="telegram", chat_id="123456", ...)
+
+# 清除会话变量
+clear_session_vars()
+```
+
+### 频道目录 (ChannelDirectory)
+
+**文件位置**: `gateway/channel_directory.py`
+
+缓存各平台可达频道/联系人的映射表。网关启动时构建，每 5 分钟刷新，保存到 `~/.hermes/channel_directory.json`。
+
+`send_message` 工具使用此文件实现 `action="list"` 功能和人友好的频道名称到数字 ID 的解析。
+
+### 会话镜像 (Mirror)
+
+**文件位置**: `gateway/mirror.py`
+
+跨平台消息投递时，将"投递镜像"记录追加到目标会话的转录中，使接收端 Agent 具有已发送内容的上下文。
+
+独立运行——可在 CLI、Cron 和网关上下文中工作，无需完整的 SessionStore 机制。
+
+### DM 配对系统 (Pairing)
+
+**文件位置**: `gateway/pairing.py`
+
+基于配对码的新用户审批流程，替代静态用户 ID 白名单。
+
+**安全特性**：
+- 8 位配对码，32 字符无歧义字母表（排除 0/O/1/I）
+- `secrets.choice()` 密码学随机
+- 1 小时配对码过期
+- 每个平台最多 3 个待处理配对码
+- 速率限制：每用户每 10 分钟 1 次请求
+- 5 次审批失败后锁定 1 小时
+- 文件权限：chmod 0600
+- 配对码永不输出到 stdout
+
+### 显示配置 (DisplayConfig)
+
+**文件位置**: `gateway/display_config.py`
+
+提供 `resolve_display_setting()` —— 读取显示设置的唯一入口，支持平台特定覆盖和合理默认值。
+
+**解析优先级**（首个非 None 值胜出）：
+1. `display.platforms.<platform>.<key>` — 显式平台覆盖
+2. `display.<key>` — 全局用户设置
+3. `_PLATFORM_DEFAULTS[<platform>][<key>]` — 内置平台默认值
+4. `_GLOBAL_DEFAULTS[<key>]` — 内置全局默认值
+
+### 内存监控 (MemoryMonitor)
+
+**文件位置**: `gateway/memory_monitor.py`
+
+周期性记录网关进程内存使用情况。每 5 分钟发出一条 `[MEMORY] ...` 结构化日志行，便于诊断长时间运行网关的内存泄漏。
+
+支持 `resource`（Linux/macOS 标准库）和 `psutil`（Windows 回退），两者均不可用时自动禁用。
+
+### 斜杠命令访问控制 (SlashAccess)
+
+**文件位置**: `gateway/slash_access.py`
+
+在现有平台白名单基础上增加第二维度：允许与网关通信的用户中，谁能运行哪些斜杠命令。
+
+两个列表（DM / 群聊作用域）：
+- `allow_admin_from`：获取所有斜杠命令的管理员用户 ID
+- `user_allowed_commands`：非管理员用户可运行的命令名列表
+
+**向后兼容**：未设置 `allow_admin_from` 时，斜杠命令门控完全禁用，所有允许用户可运行所有命令。
+
+### 表情贴纸缓存 (StickerCache)
+
+**文件位置**: `gateway/sticker_cache.py`
+
+缓存 Telegram 表情贴纸的描述文本，以 `file_unique_id` 为键。用户发送贴纸时通过视觉工具描述贴纸内容并缓存，避免重复分析。
+
+缓存位置：`~/.hermes/sticker_cache.json`
+
+### WhatsApp 身份解析 (WhatsAppIdentity)
+
+**文件位置**: `gateway/whatsapp_identity.py`
+
+统一 WhatsApp 发送者身份标识的辅助模块。WhatsApp 网桥可能以两种 JID 形式呈现同一用户（LID 形式和电话号码形式），此模块将两者归约为单一稳定身份。
+
+**公共接口**：
+- `normalize_whatsapp_identifier()` — 剥离 JID/LID 语法
+- `canonical_whatsapp_identifier()` — 通过网桥映射文件返回规范身份
+- `expand_whatsapp_aliases()` — 返回标识符的完整别名集
+
+### 运行时状态 (Status)
+
+**文件位置**: `gateway/status.py`
+
+提供基于 PID 文件的网关守护进程运行检测。PID 文件位于 `{HERMES_HOME}/gateway.pid`，供 `send_message` 工具的 `check_fn` 在 CLI 中判断网关可用性。
+
+### 关闭取证 (ShutdownForensics)
+
+**文件位置**: `gateway/shutdown_forensics.py`
+
+网关收到 SIGTERM/SIGINT 时捕获关闭上下文。提供快速（<10ms）非阻塞的 `snapshot_shutdown_context()` 供信号处理器立即记录，以及 `spawn_async_diagnostic()` 进行异步诊断。
+
+### 运行时元数据页脚 (RuntimeFooter)
+
+**文件位置**: `gateway/runtime_footer.py`
+
+在 Agent 回合的最终消息中追加紧凑的运行时元数据页脚（模型、上下文百分比、工作目录）。默认关闭，通过 `display.runtime_footer.enabled: true` 启用。
+
+### 重启常量 (Restart)
+
+**文件位置**: `gateway/restart.py`
+
+共享的网关重启常量和解析辅助函数。`GATEWAY_SERVICE_RESTART_EXIT_CODE = 75` 对应 `EX_TEMPFAIL`，请求服务管理器在优雅排空/重载后重启网关。
 
 ## 故障排查
 
