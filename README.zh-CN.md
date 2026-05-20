@@ -14,7 +14,7 @@
 
 **由 [Nous Research](https://nousresearch.com) 构建的自进化 AI 代理。** 它是唯一内置学习闭环的智能代理——从经验中创建技能，在使用中改进技能，主动持久化知识，搜索过往对话，并在跨会话中逐步构建对你的深度理解。可以在 $5 的 VPS 上运行，也可以在 GPU 集群上运行，或者使用几乎零成本的 Serverless 基础设施。它不绑定你的笔记本——你可以在 Telegram 上与它对话，而它在云端 VM 上工作。
 
-支持任意模型——[Nous Portal](https://portal.nousresearch.com)、[OpenRouter](https://openrouter.ai)（200+ 模型）、[NVIDIA NIM](https://build.nvidia.com)（Nemotron）、[小米 MiMo](https://platform.xiaomimimo.com)、[z.ai/GLM](https://z.ai)、[Kimi/Moonshot](https://platform.moonshot.ai)、[MiniMax](https://www.minimax.io)、[Hugging Face](https://huggingface.co)、OpenAI，或自定义端点。使用 `hermes model` 即可切换——无需改代码，无锁定。
+支持任意模型——[Nous Portal](https://portal.nousresearch.com)、[OpenRouter](https://openrouter.ai)（200+ 模型）、[NVIDIA Nemotron](https://build.nvidia.com)、[小米 MiMo](https://platform.xiaomimimo.com)、[z.ai/GLM](https://z.ai)、[Kimi/Moonshot](https://platform.moonshot.ai)、[MiniMax](https://www.minimaxai.com)、[Hugging Face](https://huggingface.co)、OpenAI，或自定义端点。使用 `hermes model` 即可切换——无需改代码，无锁定。
 
 <table>
 <tr><td><b>真正的终端界面</b></td><td>完整的 TUI，支持多行编辑、斜杠命令自动补全、对话历史、中断重定向和流式工具输出。</td></tr>
@@ -25,6 +25,22 @@
 <tr><td><b>随处运行</b></td><td>六种终端后端——本地、Docker、SSH、Daytona、Singularity 和 Modal。Daytona 和 Modal 提供 Serverless 持久化——代理环境空闲时休眠、按需唤醒，空闲期间几乎零成本。$5 VPS 或 GPU 集群都能跑。</td></tr>
 <tr><td><b>研究就绪</b></td><td>批量轨迹生成、轨迹压缩——用于训练下一代工具调用模型。</td></tr>
 </table>
+
+---
+
+## 📚 文档导航
+
+| 文档 | 说明 |
+|------|------|
+| [快速上手指南](docs/quick-start.md) | 🚀 10 分钟上手 Hermes |
+| [技术调研报告](docs/technical-research-report.md) | 🔬 深入技术架构和模块分析 |
+| [架构设计文档](docs/architecture-design.md) | 🏗️ 完整系统架构详解 |
+| [配置文档](docs/configuration.md) | ⚙️ 所有配置选项说明 |
+| [部署指南](docs/deployment.md) | 📦 生产环境部署 |
+| [开发者指南](docs/developer-guide.md) | 👨‍💻 为 Hermes 贡献代码 |
+| [API 文档](docs/api-docs.md) | 📖 核心 API 参考 |
+| [最佳实践](docs/best-practices.md) | ✨ 使用技巧和注意事项 |
+| [架构文档](docs/architecture/overview.md) | 🏛️ 架构设计文档集 |
 
 ---
 
@@ -47,6 +63,8 @@ source ~/.bashrc    # 重新加载 shell（或: source ~/.zshrc）
 hermes              # 开始对话！
 ```
 
+详细安装说明请参考 [快速上手指南](docs/quick-start.md)。
+
 ---
 
 ## 快速入门
@@ -65,6 +83,17 @@ hermes doctor       # 诊断问题
 
 📖 **[完整文档 →](https://hermes-agent.nousresearch.com/docs/)**
 
+### 第一次使用？
+
+1. **安装**：运行上述安装命令
+2. **配置 API**：获取 OpenRouter、Anthropic 或其他提供商的 API 密钥
+3. **运行设置向导**：`hermes setup`
+4. **开始对话**：`hermes`
+
+详细步骤请参考 [快速上手指南](docs/quick-start.md)。
+
+---
+
 ## CLI 与消息平台 快速对照
 
 Hermes 有两种入口：用 `hermes` 启动终端 UI，或运行网关从 Telegram、Discord、Slack、WhatsApp、Signal 或 Email 与之对话。进入对话后，许多斜杠命令在两种界面中通用。
@@ -81,31 +110,136 @@ Hermes 有两种入口：用 `hermes` 启动终端 UI，或运行网关从 Teleg
 | 中断当前工作 | `Ctrl+C` 或发送新消息 | `/stop` 或发送新消息 |
 | 平台特定状态 | `/platforms` | `/status`、`/sethome` |
 
-完整命令列表请参阅 [CLI 指南](https://hermes-agent.nousresearch.com/docs/user-guide/cli) 和 [消息网关指南](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)。
+完整命令列表请参考 [CLI 指南](https://hermes-agent.nousresearch.com/docs/user-guide/cli) 和 [消息网关指南](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)。
+
+---
+
+## 核心特性
+
+### 🤖 自进化能力
+
+- **自动技能创建**：从复杂任务中自动学习并创建可复用技能
+- **技能自我改进**：技能在使用中不断优化和完善
+- **跨会话记忆**：持久化存储对话历史，支持全文搜索
+- **用户建模**：学习你的偏好、习惯和工作方式
+
+### 🌐 多平台支持
+
+| 平台 | 状态 | 特殊功能 |
+|------|------|----------|
+| Telegram | ✅ 完全支持 | Forum Topics、流式传输、按钮交互 |
+| Discord | ✅ 完全支持 | 线程、按钮、频道技能绑定 |
+| Slack | ✅ 完全支持 | Assistant API、线程 |
+| Signal | ✅ 完全支持 | 加密消息 |
+| Matrix | ✅ 完全支持 | 加密房间 |
+| WhatsApp | ✅ 支持 | 网桥集成 |
+| 微信 | ✅ 完全支持 | 个人微信、群聊 |
+| 飞书 | ✅ 完全支持 | 富文本、按钮 |
+| 企业微信 | ✅ 完全支持 | 应用回调 |
+| 钉钉 | ✅ 完全支持 | AI 卡片 |
+| 更多... | - | 持续扩展中 |
+
+### 🛠️ 强大工具生态
+
+- **40+ 内置工具**：文件操作、终端执行、浏览器、Git 等
+- **6 种执行环境**：本地、Docker、SSH、Modal、Daytona、Singularity
+- **MCP 协议支持**：连接任意 MCP 服务器扩展能力
+- **安全审批流程**：敏感操作需要用户确认
+
+### ⏰ 定时自动化
+
+- **内置 Cron 调度器**：使用自然语言定义定时任务
+- **跨平台投递**：将定时任务结果发送到任意平台
+- **任务模板**：日报、周报、备份、健康检查等
+
+---
+
+## 架构概览
+
+Hermes Agent 采用模块化分层架构：
+
+```mermaid
+graph TB
+    User[用户] --> CLI[CLI / TUI]
+    User --> Platforms[消息平台<br>Telegram/Discord/Slack等]
+    
+    CLI --> Gateway[消息网关]
+    Platforms --> Gateway
+    
+    Gateway --> AgentLoop[Agent 对话循环]
+    
+    subgraph Core[核心系统]
+        AgentLoop
+        Memory[记忆系统]
+        Skills[技能系统]
+        Tools[工具系统]
+        Models[模型适配层]
+        Context[上下文引擎]
+    end
+    
+    AgentLoop <--> Memory
+    AgentLoop <--> Skills
+    AgentLoop <--> Tools
+    AgentLoop <--> Context
+    AgentLoop --> Models
+    
+    Models --> LLM[LLM 提供商]
+    Tools --> Env[执行环境]
+    Cron[定时调度器] --> Gateway
+    
+    Memory --> Storage[(持久化存储<br>SQLite/JSONL)]
+```
+
+**核心模块：**
+
+- **Agent 对话循环**：核心消息处理逻辑
+- **消息网关**：多平台接入和会话管理
+- **记忆系统**：跨会话记忆和用户建模
+- **技能系统**：技能创建、执行和自我改进
+- **工具系统**：40+ 内置工具，支持多种执行环境
+- **模型适配层**：支持 200+ 模型，统一接口
+
+详细架构说明请参考 [架构设计文档](docs/architecture-design.md) 和 [技术调研报告](docs/technical-research-report.md)。
 
 ---
 
 ## 文档
 
-所有文档位于 **[hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)**：
+所有文档位于 **[hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)**，或查看项目内文档：
 
-| 章节 | 内容 |
+### 用户文档
+
+| 文档 | 说明 |
 |------|------|
-| [快速开始](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) | 安装 → 设置 → 2 分钟内开始首次对话 |
-| [CLI 使用](https://hermes-agent.nousresearch.com/docs/user-guide/cli) | 命令、快捷键、人格、会话 |
-| [配置](https://hermes-agent.nousresearch.com/docs/user-guide/configuration) | 配置文件、提供商、模型、所有选项 |
-| [消息网关](https://hermes-agent.nousresearch.com/docs/user-guide/messaging) | Telegram、Discord、Slack、WhatsApp、Signal、Home Assistant |
-| [安全](https://hermes-agent.nousresearch.com/docs/user-guide/security) | 命令审批、DM 配对、容器隔离 |
-| [工具与工具集](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools) | 40+ 工具、工具集系统、终端后端 |
-| [技能系统](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) | 过程记忆、技能中心、创建技能 |
-| [记忆](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) | 持久记忆、用户画像、最佳实践 |
-| [MCP 集成](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) | 连接任意 MCP 服务器扩展能力 |
-| [定时调度](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | 定时任务与平台投递 |
-| [上下文文件](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files) | 影响每次对话的项目上下文 |
-| [架构](https://hermes-agent.nousresearch.com/docs/developer-guide/architecture) | 项目结构、代理循环、关键类 |
-| [贡献](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) | 开发设置、PR 流程、代码风格 |
-| [CLI 参考](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) | 所有命令和标志 |
-| [环境变量](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) | 完整环境变量参考 |
+| [快速上手指南](docs/quick-start.md) | 🚀 10 分钟快速上手指南 |
+| [配置文档](docs/configuration.md) | ⚙️ 所有配置选项详细说明 |
+| [部署指南](docs/deployment.md) | 📦 生产环境部署指南 |
+| [最佳实践](docs/best-practices.md) | ✨ 使用技巧和常见问题 |
+
+### 技术文档
+
+| 文档 | 说明 |
+|------|------|
+| [技术调研报告](docs/technical-research-report.md) | 🔬 完整的技术调研和模块分析 |
+| [架构设计文档](docs/architecture-design.md) | 🏗️ 系统架构详解 |
+| [架构文档集](docs/architecture/overview.md) | 🏛️ 各模块详细架构文档 |
+| [技术栈说明](docs/tech-stack.md) | 💻 技术栈和依赖说明 |
+| [API 文档](docs/api-docs.md) | 📖 核心 API 参考 |
+| [开发者指南](docs/developer-guide.md) | 👨‍💻 贡献代码指南 |
+
+### 架构文档（按模块）
+
+| 文档 | 说明 |
+|------|------|
+| [整体架构](docs/architecture/overview.md) | 系统总览 |
+| [对话流程](docs/architecture/conversation-flow.md) | 消息处理完整流程 |
+| [网关架构](docs/architecture/gateway-architecture.md) | 消息网关详解 |
+| [工具调用流程](docs/architecture/tool-call-flow.md) | 工具系统详解 |
+| [技能系统](docs/architecture/skill-system.md) | 技能系统详解 |
+| [记忆系统](docs/architecture/memory-system.md) | 记忆系统详解 |
+| [定时任务流程](docs/architecture/cron-flow.md) | 定时任务详解 |
+| [目录结构](docs/architecture/directory-tree.md) | 项目结构说明 |
+| [依赖关系](docs/architecture/dependencies.md) | 依赖关系说明 |
 
 ---
 
@@ -128,7 +262,7 @@ hermes claw migrate --overwrite  # 覆盖已有冲突
 - **SOUL.md** — 人格文件
 - **记忆** — MEMORY.md 和 USER.md 条目
 - **技能** — 用户创建的技能 → `~/.hermes/skills/openclaw-imports/`
-- **命令白名单** — 审批模式
+- **命令白名单** — 审批模式设置
 - **消息设置** — 平台配置、允许用户、工作目录
 - **API 密钥** — 白名单中的密钥（Telegram、OpenRouter、OpenAI、Anthropic、ElevenLabs）
 - **TTS 资产** — 工作区音频文件
@@ -140,36 +274,88 @@ hermes claw migrate --overwrite  # 覆盖已有冲突
 
 ## 贡献
 
-欢迎贡献！请参阅 [贡献指南](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) 了解开发设置、代码风格和 PR 流程。
+欢迎贡献！请阅读以下文档了解如何参与：
 
-贡献者快速开始——克隆并使用 `setup-hermes.sh`：
+- [开发者指南](docs/developer-guide.md) — 开发环境设置、PR 流程、代码风格
+- [架构设计文档](docs/architecture-design.md) — 理解系统架构
+- [技术调研报告](docs/technical-research-report.md) — 深入技术细节
+
+**贡献者快速开始：**
 
 ```bash
+# 克隆仓库
 git clone https://github.com/NousResearch/hermes-agent.git
 cd hermes-agent
-./setup-hermes.sh     # 安装 uv、创建 venv、安装 .[all]、创建符号链接 ~/.local/bin/hermes
-./hermes              # 自动检测 venv，无需先 source
-```
 
-手动安装（等效于上述命令）：
+# 使用设置脚本
+./setup-hermes.sh
 
-```bash
+# 或手动设置
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv venv --python 3.11
 source venv/bin/activate
 uv pip install -e ".[all,dev]"
+
+# 运行测试
 python -m pytest tests/ -q
+
+# 启动 Hermes
+./hermes
 ```
 
 ---
 
 ## 社区
 
-- 💬 [Discord](https://discord.gg/NousResearch)
-- 📚 [技能中心](https://agentskills.io)
-- 🐛 [问题反馈](https://github.com/NousResearch/hermes-agent/issues)
-- 💡 [讨论区](https://github.com/NousResearch/hermes-agent/discussions)
-- 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — 社区微信桥接：在同一微信账号上运行 Hermes Agent 和 OpenClaw。
+- 💬 **Discord**：[加入我们的社区](https://discord.gg/NousResearch)
+- 📚 **技能中心**：[agentskills.io](https://agentskills.io) — 分享和发现技能
+- 🐛 **Issues**：[GitHub Issues](https://github.com/NousResearch/hermes-agent/issues) — 报告 bug 和请求功能
+- 💡 **讨论区**：[GitHub Discussions](https://github.com/NousResearch/hermes-agent/discussions) — 提问和讨论
+- 🔌 **HermesClaw**：[社区微信桥接](https://github.com/AaronWong1999/hermesclaw) — 在同一微信账号上运行 Hermes Agent 和 OpenClaw
+
+---
+
+## 项目文件结构
+
+```
+hermes-agent/
+├── agent/                    # Agent 核心模块
+├── gateway/                  # 消息网关模块
+├── tools/                    # 工具系统模块
+├── cron/                     # 定时任务模块
+├── skills/                   # 内置技能目录
+├── hermes_cli/               # CLI 模块
+├── docs/                     # 文档
+│   ├── quick-start.md        # 快速上手指南
+│   ├── technical-research-report.md  # 技术调研报告
+│   ├── architecture-design.md        # 架构设计文档
+│   ├── configuration.md      # 配置文档
+│   ├── deployment.md         # 部署指南
+│   ├── developer-guide.md    # 开发者指南
+│   ├── api-docs.md           # API 文档
+│   ├── best-practices.md     # 最佳实践
+│   ├── tech-stack.md         # 技术栈说明
+│   └── architecture/         # 架构文档集
+├── tests/                    # 测试
+├── scripts/                  # 脚本
+├── pyproject.toml            # 项目配置
+├── README.md                 # 英文 README
+└── README.zh-CN.md           # 中文 README（本文件）
+```
+
+用户数据目录 `~/.hermes/`：
+```
+~/.hermes/
+├── config.yaml               # 主配置文件
+├── .env                      # 环境变量
+├── sessions/                 # 会话历史
+├── skills/                   # 用户技能
+├── cron/                     # 定时任务
+├── hooks/                    # 事件钩子
+└── logs/                     # 日志文件
+```
+
+详细结构说明请参考 [目录结构文档](docs/architecture/directory-tree.md)。
 
 ---
 
@@ -178,3 +364,23 @@ python -m pytest tests/ -q
 MIT — 详见 [LICENSE](LICENSE)。
 
 由 [Nous Research](https://nousresearch.com) 构建。
+
+---
+
+## 致谢
+
+感谢所有为 Hermes Agent 做出贡献的开发者和社区成员！
+
+特别感谢：
+- OpenClaw 社区的早期采用者
+- 所有平台适配器的贡献者
+- 技能生态系统的建设者
+
+---
+
+**相关链接：**
+- [Nous Research 官网](https://nousresearch.com)
+- [Nous Portal](https://portal.nousresearch.com)
+- [GitHub 仓库](https://github.com/NousResearch/hermes-agent)
+- [Discord 社区](https://discord.gg/NousResearch)
+- [技能中心](https://agentskills.io)
