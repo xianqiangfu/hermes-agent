@@ -1,6 +1,6 @@
 """
-SQLite-backed fact store with entity resolution and trust scoring.
-Single-user Hermes memory store plugin.
+基于 SQLite 的事实存储，具有实体解析和信任评分功能。
+Hermes 的单用户记忆存储插件。
 """
 
 import re
@@ -13,6 +13,7 @@ try:
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
 
+# 数据库表结构定义
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
     fact_id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,28 +76,38 @@ CREATE TABLE IF NOT EXISTS memory_banks (
 );
 """
 
-# Trust adjustment constants
-_HELPFUL_DELTA   =  0.05
-_UNHELPFUL_DELTA = -0.10
-_TRUST_MIN       =  0.0
-_TRUST_MAX       =  1.0
+# 信任调整常量
+_HELPFUL_DELTA   =  0.05   # 有帮助时信任分增加
+_UNHELPFUL_DELTA = -0.10  # 无帮助时信任分减少
+_TRUST_MIN       =  0.0   # 最小信任分
+_TRUST_MAX       =  1.0   # 最大信任分
 
-# Entity extraction patterns
-_RE_CAPITALIZED  = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b')
-_RE_DOUBLE_QUOTE = re.compile(r'"([^"]+)"')
-_RE_SINGLE_QUOTE = re.compile(r"'([^']+)'")
+# 实体提取正则表达式模式
+_RE_CAPITALIZED  = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b')  # 首字母大写的多词短语
+_RE_DOUBLE_QUOTE = re.compile(r'"([^"]+)"')  # 双引号内容
+_RE_SINGLE_QUOTE = re.compile(r"'([^']+)'")  # 单引号内容
 _RE_AKA          = re.compile(
     r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)',
     re.IGNORECASE,
-)
+)  # aka 模式
 
 
 def _clamp_trust(value: float) -> float:
+    """将信任分值限制在 [_TRUST_MIN, _TRUST_MAX] 范围内。"""
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
 
 
 class MemoryStore:
-    """SQLite-backed fact store with entity resolution and trust scoring."""
+    """
+    基于 SQLite 的事实存储，具有实体解析和信任评分功能。
+
+    主要功能：
+    - 事实的增删改查
+    - 自动实体提取和关联
+    - 信任分数管理
+    - 全文检索
+    - HRR 向量编码和记忆库管理
+    """
 
     def __init__(
         self,
@@ -104,6 +115,14 @@ class MemoryStore:
         default_trust: float = 0.5,
         hrr_dim: int = 1024,
     ) -> None:
+        """
+        初始化记忆存储。
+
+        参数：
+            db_path: SQLite 数据库文件路径，None 时使用默认路径
+            default_trust: 新事实的默认信任分数
+            hrr_dim: HRR 向量维度
+        """
         if db_path is None:
             from hermes_constants import get_hermes_home
             db_path = str(get_hermes_home() / "memory_store.db")
@@ -117,30 +136,33 @@ class MemoryStore:
             check_same_thread=False,
             timeout=10.0,
         )
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # 可重入锁保证线程安全
         self._conn.row_factory = sqlite3.Row
         self._init_db()
 
     # ------------------------------------------------------------------
-    # Initialisation
+    # 初始化
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        """Create tables, indexes, and triggers if they do not exist. Enable WAL mode."""
-        # Use the shared WAL-fallback helper so memory_store.db degrades
-        # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same issue as
-        # state.db / kanban.db — see hermes_state._WAL_INCOMPAT_MARKERS).
+        """
+        创建表、索引和触发器（如果不存在）。启用 WAL 模式。
+
+        使用共享的 WAL 回退辅助函数，以便 memory_store.db 在
+        挂载于 NFS/SMB/FUSE 的 HERMES_HOME 上优雅降级（与
+        state.db / kanban.db 相同的问题，请参阅 hermes_state._WAL_INCOMPAT_MARKERS）。
+        """
         from hermes_state import apply_wal_with_fallback
         apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
         self._conn.executescript(_SCHEMA)
-        # Migrate: add hrr_vector column if missing (safe for existing databases)
+        # 迁移：如果缺少 hrr_vector 列则添加（对现有数据库安全）
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         self._conn.commit()
 
     # ------------------------------------------------------------------
-    # Public API
+    # 公共 API
     # ------------------------------------------------------------------
 
     def add_fact(
@@ -149,11 +171,19 @@ class MemoryStore:
         category: str = "general",
         tags: str = "",
     ) -> int:
-        """Insert a fact and return its fact_id.
+        """
+        插入事实并返回其 fact_id。
 
-        Deduplicates by content (UNIQUE constraint). On duplicate, returns
-        the existing fact_id without modifying the row. Extracts entities from
-        the content and links them to the fact.
+        通过内容去重（UNIQUE 约束）。重复时返回现有 fact_id 而不修改行。
+        从内容中提取实体并将其关联到事实。
+
+        参数：
+            content: 事实内容
+            category: 分类，默认为 "general"
+            tags: 标签，逗号分隔
+
+        返回：
+            事实 ID
         """
         with self._lock:
             content = content.strip()
@@ -171,18 +201,18 @@ class MemoryStore:
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
-                # Duplicate content — return existing id
+                # 重复内容——返回现有 ID
                 row = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ?", (content,)
                 ).fetchone()
                 return int(row["fact_id"])
 
-            # Entity extraction and linking
+            # 实体提取和关联
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
 
-            # Compute HRR vector after entity linking
+            # 实体关联后计算 HRR 向量
             self._compute_hrr_vector(fact_id, content)
             self._rebuild_bank(category)
 
@@ -195,10 +225,20 @@ class MemoryStore:
         min_trust: float = 0.3,
         limit: int = 10,
     ) -> list[dict]:
-        """Full-text search over facts using FTS5.
+        """
+        使用 FTS5 对事实进行全文搜索。
 
-        Returns a list of fact dicts ordered by FTS5 rank, then trust_score
-        descending. Also increments retrieval_count for matched facts.
+        返回按 FTS5 排名排序、然后按信任分数降序排序的事实字典列表。
+        同时增加匹配事实的检索计数。
+
+        参数：
+            query: 搜索查询
+            category: 可选分类过滤
+            min_trust: 最小信任分数过滤
+            limit: 返回结果数量限制
+
+        返回：
+            事实字典列表
         """
         with self._lock:
             query = query.strip()
@@ -247,9 +287,18 @@ class MemoryStore:
         tags: str | None = None,
         category: str | None = None,
     ) -> bool:
-        """Partially update a fact. Trust is clamped to [0, 1].
+        """
+        部分更新事实。信任分数被限制在 [0, 1] 范围内。
 
-        Returns True if the row existed, False otherwise.
+        参数：
+            fact_id: 事实 ID
+            content: 新内容（可选）
+            trust_delta: 信任分数变化量（可选）
+            tags: 新标签（可选）
+            category: 新分类（可选）
+
+        返回：
+            如果行存在则返回 True，否则返回 False
         """
         with self._lock:
             row = self._conn.execute(
@@ -282,7 +331,7 @@ class MemoryStore:
             )
             self._conn.commit()
 
-            # If content changed, re-extract entities
+            # 如果内容改变，重新提取实体
             if content is not None:
                 self._conn.execute(
                     "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
@@ -292,10 +341,10 @@ class MemoryStore:
                     self._link_fact_entity(fact_id, entity_id)
                 self._conn.commit()
 
-            # Recompute HRR vector if content changed
+            # 如果内容改变，重新计算 HRR 向量
             if content is not None:
                 self._compute_hrr_vector(fact_id, content)
-            # Rebuild bank for relevant category
+            # 重建相关分类的记忆库
             cat = category or self._conn.execute(
                 "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
             ).fetchone()["category"]
@@ -304,7 +353,9 @@ class MemoryStore:
             return True
 
     def remove_fact(self, fact_id: int) -> bool:
-        """Delete a fact and its entity links. Returns True if the row existed."""
+        """
+        删除事实及其实体关联。如果行存在则返回 True。
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT fact_id, category FROM facts WHERE fact_id = ?", (fact_id,)
@@ -326,9 +377,10 @@ class MemoryStore:
         min_trust: float = 0.0,
         limit: int = 50,
     ) -> list[dict]:
-        """Browse facts ordered by trust_score descending.
+        """
+        浏览按信任分数降序排序的事实。
 
-        Optionally filter by category and minimum trust score.
+        可选按分类和最小信任分数过滤。
         """
         with self._lock:
             params: list = [min_trust]
@@ -351,13 +403,14 @@ class MemoryStore:
             return [self._row_to_dict(r) for r in rows]
 
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
-        """Record user feedback and adjust trust asymmetrically.
+        """
+        记录用户反馈并不对称地调整信任分数。
 
         helpful=True  -> trust += 0.05, helpful_count += 1
         helpful=False -> trust -= 0.10
 
-        Returns a dict with fact_id, old_trust, new_trust, helpful_count.
-        Raises KeyError if fact_id does not exist.
+        返回包含 fact_id、old_trust、new_trust、helpful_count 的字典。
+        如果 fact_id 不存在则抛出 KeyError。
         """
         with self._lock:
             row = self._conn.execute(
@@ -392,19 +445,20 @@ class MemoryStore:
             }
 
     # ------------------------------------------------------------------
-    # Entity helpers
+    # 实体辅助函数
     # ------------------------------------------------------------------
 
     def _extract_entities(self, text: str) -> list[str]:
-        """Extract entity candidates from text using simple regex rules.
+        """
+        使用简单的正则表达式规则从文本中提取实体候选。
 
-        Rules applied (in order):
-        1. Capitalized multi-word phrases  e.g. "John Doe"
-        2. Double-quoted terms             e.g. "Python"
-        3. Single-quoted terms             e.g. 'pytest'
-        4. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
+        应用的规则（按顺序）：
+        1. 首字母大写的多词短语（如 "John Doe"）
+        2. 双引号内容（如 "Python"）
+        3. 单引号内容（如 'pytest'）
+        4. aka 模式（如 "Guido aka BDFL" → 两个实体）
 
-        Returns a deduplicated list preserving first-seen order.
+        返回去重的列表，保持首次出现的顺序。
         """
         seen: set[str] = set()
         candidates: list[str] = []
@@ -431,18 +485,19 @@ class MemoryStore:
         return candidates
 
     def _resolve_entity(self, name: str) -> int:
-        """Find an existing entity by name or alias (case-insensitive) or create one.
-
-        Returns the entity_id.
         """
-        # Exact name match
+        按名称或别名（不区分大小写）查找现有实体，或创建一个新实体。
+
+        返回实体 ID。
+        """
+        # 精确名称匹配
         row = self._conn.execute(
             "SELECT entity_id FROM entities WHERE name LIKE ?", (name,)
         ).fetchone()
         if row is not None:
             return int(row["entity_id"])
 
-        # Search aliases — aliases stored as comma-separated; use LIKE with % boundaries
+        # 搜索别名——别名存储为逗号分隔；使用带 % 边界的 LIKE
         alias_row = self._conn.execute(
             """
             SELECT entity_id FROM entities
@@ -453,7 +508,7 @@ class MemoryStore:
         if alias_row is not None:
             return int(alias_row["entity_id"])
 
-        # Create new entity
+        # 创建新实体
         cur = self._conn.execute(
             "INSERT INTO entities (name) VALUES (?)", (name,)
         )
@@ -461,7 +516,7 @@ class MemoryStore:
         return int(cur.lastrowid)  # type: ignore[return-value]
 
     def _link_fact_entity(self, fact_id: int, entity_id: int) -> None:
-        """Insert into fact_entities, silently ignore if the link already exists."""
+        """插入到 fact_entities 中，如果关联已存在则静默忽略。"""
         self._conn.execute(
             """
             INSERT OR IGNORE INTO fact_entities (fact_id, entity_id)
@@ -472,12 +527,14 @@ class MemoryStore:
         self._conn.commit()
 
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
-        """Compute and store HRR vector for a fact. No-op if numpy unavailable."""
+        """
+        为事实计算并存储 HRR 向量。如果 numpy 不可用则为空操作。
+        """
         with self._lock:
             if not self._hrr_available:
                 return
 
-            # Get entities linked to this fact
+            # 获取与此事实关联的实体
             rows = self._conn.execute(
                 """
                 SELECT e.name FROM entities e
@@ -496,7 +553,9 @@ class MemoryStore:
             self._conn.commit()
 
     def _rebuild_bank(self, category: str) -> None:
-        """Full rebuild of a category's memory bank from all its fact vectors."""
+        """
+        从分类的所有事实向量完全重建记忆库。
+        """
         with self._lock:
             if not self._hrr_available:
                 return
@@ -516,7 +575,7 @@ class MemoryStore:
             bank_vector = hrr.bundle(*vectors)
             fact_count = len(vectors)
 
-            # Check SNR
+            # 检查信噪比
             hrr.snr_estimate(self.hrr_dim, fact_count)
 
             self._conn.execute(
@@ -534,9 +593,10 @@ class MemoryStore:
             self._conn.commit()
 
     def rebuild_all_vectors(self, dim: int | None = None) -> int:
-        """Recompute all HRR vectors + banks from text. For recovery/migration.
+        """
+        从文本重建所有 HRR 向量和记忆库。用于恢复/迁移。
 
-        Returns the number of facts processed.
+        返回处理的事实数量。
         """
         with self._lock:
             if not self._hrr_available:
@@ -560,15 +620,15 @@ class MemoryStore:
             return len(rows)
 
     # ------------------------------------------------------------------
-    # Utilities
+    # 工具函数
     # ------------------------------------------------------------------
 
     def _row_to_dict(self, row: sqlite3.Row) -> dict:
-        """Convert a sqlite3.Row to a plain dict."""
+        """将 sqlite3.Row 转换为普通字典。"""
         return dict(row)
 
     def close(self) -> None:
-        """Close the database connection."""
+        """关闭数据库连接。"""
         self._conn.close()
 
     def __enter__(self) -> "MemoryStore":

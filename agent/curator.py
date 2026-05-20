@@ -1,22 +1,21 @@
-"""Curator — background skill maintenance orchestrator.
+"""
+策展器——后台技能维护协调器。
 
-The curator is an auxiliary-model task that periodically reviews agent-created
-skills and maintains the collection. It runs inactivity-triggered (no cron
-daemon): when the agent is idle and the last curator run was longer than
-``interval_hours`` ago, ``maybe_run_curator()`` spawns a forked AIAgent to do
-the review.
+策展器是一个辅助模型任务，定期审查代理创建的技能并维护集合。
+它在不活动时触发（无 cron 守护进程）：当代理空闲且上次策展器运行
+早于 ``interval_hours`` 时，``maybe_run_curator()`` 会派生出一个
+分叉的 AIAgent 来进行审查。
 
-Responsibilities:
-  - Auto-transition lifecycle states based on derived skill activity timestamps
-  - Spawn a background review agent that can pin / archive / consolidate /
-    patch agent-created skills via skill_manage
-  - Persist curator state (last_run_at, paused, etc.) in .curator_state
+职责：
+  - 根据派生的技能活动时间戳自动转换生命周期状态
+  - 派生出后台审查代理，可以通过 skill_manage 固定/归档/合并/补丁代理创建的技能
+  - 在 .curator_state 中持久化策展器状态（last_run_at、paused 等）
 
-Strict invariants:
-  - Only touches agent-created skills (see tools/skill_usage.is_agent_created)
-  - Never auto-deletes — only archives. Archive is recoverable.
-  - Pinned skills bypass all auto-transitions
-  - Uses the auxiliary client; never touches the main session's prompt cache
+严格不变量：
+  - 只接触代理创建的技能（请参阅 tools/skill_usage.is_agent_created）
+  - 永远不自动删除——只归档。归档是可恢复的。
+  - 固定的技能绕过所有自动转换
+  - 使用辅助客户端；永远不接触主会话的提示缓存
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_aux_credential(value: Any) -> Optional[str]:
+    """去除辅助凭据值的空白，并处理 None 值。"""
     if value is None:
         return None
     text = str(value).strip()
@@ -45,29 +45,30 @@ def _strip_aux_credential(value: Any) -> Optional[str]:
 
 
 class _ReviewRuntimeBinding(NamedTuple):
-    """Provider/model for the curator review fork plus optional per-slot overrides."""
-
+    """策展器审查分叉的提供商/模型以及可选的每个槽覆盖。"""
     provider: str
     model: str
     explicit_api_key: Optional[str]
     explicit_base_url: Optional[str]
 
 
-DEFAULT_INTERVAL_HOURS = 24 * 7  # 7 days
+DEFAULT_INTERVAL_HOURS = 24 * 7  # 7 天
 DEFAULT_MIN_IDLE_HOURS = 2
 DEFAULT_STALE_AFTER_DAYS = 30
 DEFAULT_ARCHIVE_AFTER_DAYS = 90
 
 
 # ---------------------------------------------------------------------------
-# .curator_state — persistent scheduler + status
+# .curator_state——持久化调度器 + 状态
 # ---------------------------------------------------------------------------
 
 def _state_file() -> Path:
+    """返回 .curator_state 文件的路径。"""
     return get_hermes_home() / "skills" / ".curator_state"
 
 
 def _default_state() -> Dict[str, Any]:
+    """返回默认的策展器状态字典。"""
     return {
         "last_run_at": None,
         "last_run_duration_seconds": None,
@@ -80,6 +81,11 @@ def _default_state() -> Dict[str, Any]:
 
 
 def load_state() -> Dict[str, Any]:
+    """
+    加载策展器状态。
+
+    如果文件不存在或损坏，返回默认状态。
+    """
     path = _state_file()
     if not path.exists():
         return _default_state()
@@ -95,6 +101,11 @@ def load_state() -> Dict[str, Any]:
 
 
 def save_state(data: Dict[str, Any]) -> None:
+    """
+    保存策展器状态。
+
+    原子写入：先写入临时文件，然后重命名以避免损坏。
+    """
     path = _state_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,21 +127,25 @@ def save_state(data: Dict[str, Any]) -> None:
 
 
 def set_paused(paused: bool) -> None:
+    """设置策展器的暂停状态。"""
     state = load_state()
     state["paused"] = bool(paused)
     save_state(state)
 
 
 def is_paused() -> bool:
+    """检查策展器是否暂停。"""
     return bool(load_state().get("paused"))
 
 
 # ---------------------------------------------------------------------------
-# Config access
+# 配置访问
 # ---------------------------------------------------------------------------
 
 def _load_config() -> Dict[str, Any]:
-    """Read curator.* config from ~/.hermes/config.yaml. Tolerates missing file."""
+    """
+    从 ~/.hermes/config.yaml 读取 curator.* 配置。容忍文件缺失。
+    """
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
@@ -146,12 +161,13 @@ def _load_config() -> Dict[str, Any]:
 
 
 def is_enabled() -> bool:
-    """Default ON when no config says otherwise."""
+    """没有配置说明否则时默认启用。"""
     cfg = _load_config()
     return bool(cfg.get("enabled", True))
 
 
 def get_interval_hours() -> int:
+    """获取策展运行间隔（小时）。"""
     cfg = _load_config()
     try:
         return int(cfg.get("interval_hours", DEFAULT_INTERVAL_HOURS))
@@ -160,6 +176,7 @@ def get_interval_hours() -> int:
 
 
 def get_min_idle_hours() -> float:
+    """获取触发策展所需的最小空闲时间（小时）。"""
     cfg = _load_config()
     try:
         return float(cfg.get("min_idle_hours", DEFAULT_MIN_IDLE_HOURS))
@@ -168,6 +185,7 @@ def get_min_idle_hours() -> float:
 
 
 def get_stale_after_days() -> int:
+    """获取标记为过时的天数阈值。"""
     cfg = _load_config()
     try:
         return int(cfg.get("stale_after_days", DEFAULT_STALE_AFTER_DAYS))
@@ -176,6 +194,7 @@ def get_stale_after_days() -> int:
 
 
 def get_archive_after_days() -> int:
+    """获取归档的天数阈值。"""
     cfg = _load_config()
     try:
         return int(cfg.get("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS))
@@ -184,10 +203,11 @@ def get_archive_after_days() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Idle / interval check
+# 空闲/间隔检查
 # ---------------------------------------------------------------------------
 
 def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    """解析 ISO 格式时间戳字符串，失败时返回 None。"""
     if not ts:
         return None
     try:
@@ -197,25 +217,25 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
 
 
 def should_run_now(now: Optional[datetime] = None) -> bool:
-    """Return True if the curator should run immediately.
+    """
+    如果策展器现在应该运行则返回 True。
 
-    Gates:
+    门槛：
       - curator.enabled == True
-      - not paused
-      - last_run_at present AND older than interval_hours
+      - 未暂停
+      - last_run_at 存在且早于 interval_hours
 
-    First-run behavior: when there is no ``last_run_at`` (fresh install, or
-    install that predates the curator), we DO NOT run immediately. The
-    curator is designed to run after at least ``interval_hours`` (7 days by
-    default) of skill activity, not on the first background tick after
-    ``hermes update``. On first observation we seed ``last_run_at`` to "now"
-    and defer the first real pass by one full interval. Users who want to
-    run it sooner can always invoke ``hermes curator run`` (with or without
-    ``--dry-run``) explicitly — that path bypasses this gate.
+    首次运行行为：当没有 ``last_run_at`` 时（全新安装，或
+    安装早于策展器），我们不会立即运行。策展器设计为
+    在至少 ``interval_hours``（默认为 7 天）的技能活动后运行，
+    而不是在 ``hermes update`` 后的第一个后台 tick 上运行。
+    首次观察时，我们将 ``last_run_at`` 设定为"现在"，
+    并将第一次真正的运行推迟一个完整的间隔。
+    希望更早运行的用户总是可以显式调用
+    ``hermes curator run``（带或不带 ``--dry-run``）——该路径绕过此门槛。
 
-    The idle check (min_idle_hours) is applied at the call site where we know
-    whether an agent is actively running — here we only enforce the static
-    gates.
+    空闲检查（min_idle_hours）在知道代理是否正在运行的调用站点应用——
+    这里我们只执行静态门槛。
     """
     if not is_enabled():
         return False
@@ -225,9 +245,8 @@ def should_run_now(now: Optional[datetime] = None) -> bool:
     state = load_state()
     last = _parse_iso(state.get("last_run_at"))
     if last is None:
-        # Never run before. Seed state so we wait a full interval before the
-        # first real pass. Report-only; do not auto-mutate the library the
-        # very first time a gateway ticks after an update.
+        # 从未运行过。设定状态以便我们等待一个完整的间隔后再进行第一次真正的运行。
+        # 仅报告；不要在更新后第一次网关 tick 时自动改变库。
         if now is None:
             now = datetime.now(timezone.utc)
         try:
@@ -237,7 +256,7 @@ def should_run_now(now: Optional[datetime] = None) -> bool:
                 "interval; use `hermes curator run --dry-run` to preview now"
             )
             save_state(state)
-        except Exception as e:  # pragma: no cover — best-effort persistence
+        except Exception as e:  # pragma: no cover — 尽最大努力持久化
             logger.debug("Failed to seed curator last_run_at: %s", e)
         return False
 
@@ -250,13 +269,16 @@ def should_run_now(now: Optional[datetime] = None) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Automatic state transitions (pure function, no LLM)
+# 自动状态转换（纯函数，无 LLM）
 # ---------------------------------------------------------------------------
 
 def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int]:
-    """Walk every agent-created skill and move active/stale/archived based on
-    the latest real activity timestamp. Pinned skills are never touched.
-    Returns a counter dict describing what changed."""
+    """
+    遍历每个代理创建的技能，并根据最新的真实活动时间戳移动 active/stale/archived。
+    固定的技能永远不被接触。
+
+    返回描述变化的计数字典。
+    """
     from tools import skill_usage as _u
 
     if now is None:
@@ -273,8 +295,7 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
             continue
 
         last_activity = _parse_iso(row.get("last_activity_at"))
-        # If never active, treat created_at as the anchor so new skills don't
-        # immediately archive themselves.
+        # 如果从未活动，将 created_at 作为锚点，这样新技能不会立即归档自己。
         anchor = last_activity or _parse_iso(row.get("created_at")) or now
         if anchor.tzinfo is None:
             anchor = anchor.replace(tzinfo=timezone.utc)
@@ -286,10 +307,10 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
             if ok:
                 counts["archived"] += 1
         elif anchor <= stale_cutoff and current == _u.STATE_ACTIVE:
-            _u.set_state(name, _u.STATE_STALE)
+            _u.set_state(name, _u.STALE_STALE)
             counts["marked_stale"] += 1
         elif anchor > stale_cutoff and current == _u.STATE_STALE:
-            # Skill got used again after being marked stale — reactivate.
+            # 技能在被标记为过时时又被使用了——重新激活。
             _u.set_state(name, _u.STATE_ACTIVE)
             counts["reactivated"] += 1
 
@@ -297,171 +318,133 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
 
 
 # ---------------------------------------------------------------------------
-# Review prompt for the forked agent
+# 分叉代理的审查提示
 # ---------------------------------------------------------------------------
 
-CURATOR_DRY_RUN_BANNER = (
-    "═══════════════════════════════════════════════════════════════\n"
-    "DRY-RUN — REPORT ONLY. DO NOT MUTATE THE SKILL LIBRARY.\n"
-    "═══════════════════════════════════════════════════════════════\n"
-    "\n"
-    "This is a PREVIEW pass. Follow every instruction below EXCEPT:\n"
-    "\n"
-    "  • DO NOT call skill_manage with action=patch, create, delete, "
-    "write_file, or remove_file.\n"
-    "  • DO NOT call terminal to mv skill directories into .archive/.\n"
-    "  • DO NOT call terminal to mv, cp, rm, or rewrite any file under "
-    "~/.hermes/skills/.\n"
-    "  • skills_list and skill_view are FINE — read as much as you need.\n"
-    "\n"
-    "Your output IS the deliverable. Produce the exact same "
-    "human-readable summary and structured YAML block you would "
-    "produce on a live run — but describe the actions you WOULD take, "
-    "not actions you took. A downstream reviewer will read the report "
-    "and decide whether to approve a live run with "
-    "`hermes curator run` (no flag).\n"
-    "\n"
-    "If you accidentally take a mutating action, say so explicitly in "
-    "the summary so the reviewer can revert it.\n"
-    "═══════════════════════════════════════════════════════════════"
-)
+CURATOR_DRY_RUN_BANNER = """
+═══════════════════════════════════════════════════════════════
+DRY-RUN — 仅报告。不要改变技能库。
+═══════════════════════════════════════════════════════════════
+
+这是预览运行。完全按照以下说明操作，除了：
+
+  • 不要调用 skill_manage 使用 action=patch、create、delete、write_file 或 remove_file。
+  • 不要调用 terminal 将技能目录移动到 .archive/ 中。
+  • 不要调用 terminal 在 ~/.hermes/skills/ 下移动、复制、删除或重写任何文件。
+  • skills_list 和 skill_view 没问题——尽情阅读。
+
+你的输出就是交付物。生成与真实运行时完全相同的
+人类可读摘要和结构化 YAML 块——但描述你会采取的行动，
+而不是你已采取的行动。下游审阅者将阅读报告并决定是否
+批准使用 `hermes curator run`（不带标志）的真实运行。
+
+如果你不小心采取了变更操作，请在摘要中明确说明，以便审阅者可以恢复它。
+═══════════════════════════════════════════════════════════════
+"""
 
 
-CURATOR_REVIEW_PROMPT = (
-    "You are running as Hermes' background skill CURATOR. This is an "
-    "UMBRELLA-BUILDING consolidation pass, not a passive audit and not a "
-    "duplicate-finder.\n\n"
-    "The goal of the skill collection is a LIBRARY OF CLASS-LEVEL "
-    "INSTRUCTIONS AND EXPERIENTIAL KNOWLEDGE. A collection of hundreds of "
-    "narrow skills where each one captures one session's specific bug is "
-    "a FAILURE of the library — not a feature. An agent searching skills "
-    "matches on descriptions, not on exact names; one broad umbrella "
-    "skill with labeled subsections beats five narrow siblings for "
-    "discoverability, not the other way around.\n\n"
-    "The right target shape is CLASS-LEVEL skills with rich SKILL.md "
-    "bodies + `references/`, `templates/`, and `scripts/` subfiles for "
-    "session-specific detail — not one-session-one-skill micro-entries.\n\n"
-    "Hard rules — do not violate:\n"
-    "1. DO NOT touch bundled or hub-installed skills. The candidate list "
-    "below is already filtered to agent-created skills only.\n"
-    "2. DO NOT delete any skill. Archiving (moving the skill's directory "
-    "into ~/.hermes/skills/.archive/) is the maximum destructive action. "
-    "Archives are recoverable; deletion is not.\n"
-    "3. DO NOT touch skills shown as pinned=yes. Skip them entirely.\n"
-    "4. DO NOT use usage counters as a reason to skip consolidation. The "
-    "counters are new and often mostly zero. Judge overlap on CONTENT, "
-    "not on use_count. 'use=0' is not evidence a skill is valuable; it's "
-    "absence of evidence either way.\n"
-    "5. DO NOT reject consolidation on the grounds that 'each skill has "
-    "a distinct trigger'. Pairwise distinctness is the wrong bar. The "
-    "right bar is: 'would a human maintainer write this as N separate "
-    "skills, or as one skill with N labeled subsections?' When the "
-    "answer is the latter, merge.\n\n"
-    "How to work — not optional:\n"
-    "1. Scan the full candidate list. Identify PREFIX CLUSTERS (skills "
-    "sharing a first word or domain keyword). Examples you are likely "
-    "to find: hermes-config-*, hermes-dashboard-*, gateway-*, codex-*, "
-    "ollama-*, anthropic-*, gemini-*, mcp-*, salvage-*, pr-*, "
-    "competitor-*, python-*, security-*, etc. Expect 10-25 clusters.\n"
-    "2. For each cluster with 2+ members, do NOT ask 'are these pairs "
-    "overlapping?' — ask 'what is the UMBRELLA CLASS these skills all "
-    "serve? Would a maintainer name that class and write one skill for "
-    "it?' If yes, pick (or create) the umbrella and absorb the siblings "
-    "into it.\n"
-    "3. Three ways to consolidate — use the right one per cluster:\n"
-    "   a. MERGE INTO EXISTING UMBRELLA — one skill in the cluster is "
-    "already broad enough to be the umbrella (example: `pr-triage-"
-    "salvage` for the PR review cluster). Patch it to add a labeled "
-    "section for each sibling's unique insight, then archive the "
-    "siblings.\n"
-    "   b. CREATE A NEW UMBRELLA SKILL.md — no existing member is broad "
-    "enough. Use skill_manage action=create to write a new class-level "
-    "skill whose SKILL.md covers the shared workflow and has short "
-    "labeled subsections. Archive the now-absorbed narrow siblings.\n"
-    "   c. DEMOTE TO REFERENCES/TEMPLATES/SCRIPTS — a sibling has "
-    "narrow-but-valuable session-specific content. Move it into the "
-    "umbrella's appropriate support directory:\n"
-    "      • `references/<topic>.md` for session-specific detail OR "
-    "condensed knowledge banks (quoted research, API docs excerpts, "
-    "domain notes, provider quirks, reproduction recipes)\n"
-    "      • `templates/<name>.<ext>` for starter files meant to be "
-    "copied and modified\n"
-    "      • `scripts/<name>.<ext>` for statically re-runnable actions "
-    "(verification scripts, fixture generators, probes)\n"
-    "      Then archive the old sibling. Use `terminal` with `mkdir -p "
-    "~/.hermes/skills/<umbrella>/references/ && mv ... <umbrella>/"
-    "references/<topic>.md` (or templates/ / scripts/).\n"
-    "4. Also flag skills whose NAME is too narrow (contains a PR number, "
-    "a feature codename, a specific error string, an 'audit' / "
-    "'diagnosis' / 'salvage' session artifact). These almost always "
-    "belong as a subsection or support file under a class-level umbrella.\n"
-    "5. Iterate. After one consolidation round, scan the remaining set "
-    "and look for the NEXT umbrella opportunity. Don't stop after 3 "
-    "merges.\n\n"
-    "Your toolset:\n"
-    "  - skills_list, skill_view        — read the current landscape\n"
-    "  - skill_manage action=patch      — add sections to the umbrella\n"
-    "  - skill_manage action=create     — create a new umbrella SKILL.md\n"
-    "  - skill_manage action=write_file — add a references/, templates/, "
-    "or scripts/ file under an existing skill (the skill must already "
-    "exist)\n"
-    "  - skill_manage action=delete     — archive a skill. MUST pass "
-    "`absorbed_into=<umbrella>` when you've merged its content into another "
-    "skill, or `absorbed_into=\"\"` when you're truly pruning with no "
-    "forwarding target. This drives cron-job skill-reference migration — "
-    "guessing from your YAML summary after the fact is fragile.\n"
-    "  - terminal                       — mv a sibling into the archive "
-    "OR move its content into a support subfile\n\n"
-    "'keep' is a legitimate decision ONLY when the skill is already a "
-    "class-level umbrella and none of the proposed merges would improve "
-    "discoverability. 'This is narrow but distinct from its siblings' "
-    "is NOT a reason to keep — it's a reason to move it under an "
-    "umbrella as a subsection or support file.\n\n"
-    "Expected output: real umbrella-ification. Process every obvious "
-    "cluster. If you end the pass with fewer than 10 archives, you "
-    "stopped too early — go back and look at the clusters you left "
-    "alone.\n\n"
-    "When done, write a human summary AND a structured machine-readable "
-    "block so downstream tooling can distinguish consolidation from "
-    "pruning. Format EXACTLY:\n\n"
-    "## Structured summary (required)\n"
-    "```yaml\n"
-    "consolidations:\n"
-    "  - from: <old-skill-name>\n"
-    "    into: <umbrella-skill-name>\n"
-    "    reason: <one short sentence — why merged, not just 'similar'>\n"
-    "prunings:\n"
-    "  - name: <skill-name>\n"
-    "    reason: <one short sentence — why archived with no merge target>\n"
-    "```\n\n"
-    "Every skill you moved to .archive/ MUST appear in exactly one of the "
-    "two lists. If you consolidated X into umbrella Y (patched Y, wrote "
-    "a references file to Y, or created Y with X's content absorbed), X "
-    "goes under `consolidations` with `into: Y`. If you archived X with "
-    "no absorption — truly stale, irrelevant, or obsolete — X goes under "
-    "`prunings`. Leave a list empty (`consolidations: []`) if none. Do "
-    "not omit the block. The block comes AFTER your human-readable "
-    "summary of clusters processed, patches made, and decisions left alone."
-)
+CURATOR_REVIEW_PROMPT = """
+你作为 Hermes 的后台技能策展器运行。这是伞形构建合并通道，
+不是被动审计，也不是重复项查找器。
+
+技能库的目标是类级指令和经验知识的库。
+数百个狭义技能的集合，每个都捕获一个会话的特定 bug，
+是库的失败——不是特性。代理搜索技能时匹配描述，
+而不是精确名称；一个带有标记子部分的广泛伞形技能在可发现性方面胜过五个狭义的兄弟技能，
+而不是相反。
+
+正确的目标形状是类级技能，具有丰富的 SKILL.md 主体 + references/、templates/、
+和 scripts/ 子文件用于会话特定细节——不是一个会话一个技能的微条目。
+
+硬性规则——不要违反：
+1. 不要接触捆绑或从集线器安装的技能。下面的候选列表已过滤为仅代理创建的技能。
+2. 不要删除任何技能。归档（将技能目录移动到 ~/.hermes/skills/.archive/）是最大的破坏性操作。
+   归档是可恢复的；删除不是。
+3. 不要接触显示为 pinned=yes 的技能。完全跳过它们。
+4. 不要使用使用计数作为跳过合并的理由。计数器是新的，通常大部分为零。根据内容判断重叠，
+   而不是使用计数。'use=0' 不是技能有价值的证据；这是两者都没有的证据。
+5. 不要以'每个技能都有不同的触发器'为由拒绝合并。成对的区别是错误的标准。
+   正确的标准是：'人类维护者会将此写成 N 个单独的技能，还是写成一个带有 N 个标记子部分的技能？'
+   当答案是后者时，合并。
+
+如何工作——不可选：
+1. 扫描完整候选列表。识别前缀聚类（共享第一个单词或领域关键词的技能）。
+   你可能会发现的示例：hermes-config-*、hermes-dashboard-*、gateway-*、codex-*、
+   ollama-*、anthropic-*、gemini-*、mcp-*、salvage-*、pr-*、competitor-*、python-*、security-* 等。
+   预计有 10-25 个聚类。
+2. 对于每个有 2+ 成员的聚类，不要问'这些成对重叠吗？'——而是问'这些技能都服务的伞形类是什么？
+   维护者会命名那个类并为它写一个技能吗？'如果是，选择（或创建）伞形并吸收兄弟技能。
+3. 三种合并方式——为每个聚类使用正确的一种：
+   a. 合并到现有伞形——聚类中的一个技能已经足够广泛成为伞形（例如：PR 审查聚类的 `pr-triage-salvage`）。
+      补丁它为每个兄弟的独特洞察添加标记部分，然后归档兄弟技能。
+   b. 创建新的伞形 SKILL.md——没有现有成员足够广泛。使用 skill_manage action=create
+      写一个新的类级技能，其 SKILL.md 涵盖共享工作流程并有简短的标记子部分。归档现在被吸收的狭义兄弟技能。
+   c. 降级为 references/templates/scripts——兄弟技能有狭义但有价值的会话特定内容。
+      将其移动到伞形的适当支持目录中：
+        • references/<topic>.md 用于会话特定细节或浓缩知识库（引用的研究、API 文档摘录、领域说明、
+          提供商怪癖、复现食谱）
+        • templates/<name>.<ext> 用于旨在被复制和修改的启动文件
+        • scripts/<name>.<ext> 用于静态可重运行操作（验证脚本、夹具生成器、探测器）
+      然后归档旧的兄弟技能。使用 `terminal` 与 `mkdir -p ~/.hermes/skills/<umbrella>/references/ && mv ... <umbrella>/references/<topic>.md`
+      （或 templates/ / scripts/）。
+4. 还要标记名称过于狭窄的技能（包含 PR 编号、功能代号、特定错误字符串、
+   '审计'/'诊断'/'打捞'会话工件）。这些几乎总是属于类级伞形下的子部分或支持文件。
+5. 迭代。一轮合并后，扫描剩余集并寻找下一个伞形机会。不要在 3 次合并后停止。
+
+你的工具集：
+  • skills_list、skill_view——阅读当前格局
+  • skill_manage action=patch——向伞形添加部分
+  • skill_manage action=create——创建新的伞形 SKILL.md
+  • skill_manage action=write_file——向现有技能添加 references/、templates/ 或 scripts/ 文件（技能必须已存在）
+  • skill_manage action=delete——归档技能。当你将其内容合并到另一个技能时，必须传递 `absorbed_into=<umbrella>`，
+    或者当你真正修剪时传递 `absorbed_into=""`。这驱动 cron 作业技能引用迁移——
+    事后从你的 YAML 摘要猜测是脆弱的。
+  • terminal——将兄弟技能移动到归档或将其内容移动到支持子文件
+
+'保持'是一个合法的决定，仅当技能已经是类级伞形并且没有提议的合并会改善可发现性时。
+'这很狭窄但与兄弟不同'不是保持的理由——这是作为子部分或支持文件移到伞形下的理由。
+
+预期输出：真正的伞形化。处理每个明显的聚类。如果你以少于 10 个归档结束运行，
+你停止得太早了——回去看看你留下的聚类。
+
+完成后，写一个人类摘要和一个结构化的机器可读块，以便下游工具可以区分合并和修剪。
+完全按以下格式：
+
+## 结构化摘要（必填）
+```yaml
+consolidations:
+  - from: <old-skill-name>
+    into: <umbrella-skill-name>
+    reason: <一个简短句子——为什么合并，而不只是'相似'>
+prunings:
+  - name: <skill-name>
+    reason: <一个简短句子——为什么无合并目标地归档>
+```
+
+你移动到 .archive/ 的每个技能必须恰好出现在两个列表之一中。如果你将 X 合并到伞形 Y
+（补丁 Y，向 Y 写 references 文件，或创建 Y 吸收 X 的内容），X 进入 `consolidations` 并带有 `into: Y`。
+如果你归档 X 而没有吸收——真正过时、不相关或过时——X 进入 `prunings`。
+如果没有则将列表留空（`consolidations: []`）。不要省略该块。该块在你的人类可读的
+聚类处理、补丁制作和决定保持的摘要之后。
+"""
 
 
 # ---------------------------------------------------------------------------
-# Per-run reports — {YYYYMMDD-HHMMSS}/run.json + REPORT.md under logs/curator/
+# 每次运行报告——logs/curator/{YYYYMMDD-HHMMSS}/ 下的 run.json + REPORT.md
 # ---------------------------------------------------------------------------
 
 def _reports_root() -> Path:
-    """Directory where curator run reports are written.
+    """
+    策展运行报告写入的目录。
 
-    Lives under the profile-aware logs dir (``~/.hermes/logs/curator/``)
-    alongside ``agent.log`` and ``gateway.log`` so it's found by anyone
-    looking for operational telemetry, not mixed in with the user's
-    authored skill data in ``~/.hermes/skills/``.
+    位于配置文件感知的日志目录（``~/.hermes/logs/curator/``）下，
+    与 ``agent.log`` 和 ``gateway.log`` 一起，以便任何寻找操作遥测的人都能找到它，
+    而不是与用户在 ``~/.hermes/skills/`` 中的创作技能数据混在一起。
 
-    ``ensure_hermes_home()`` pre-creates this dir on every CLI launch and
-    the v22→v23 migration backfills it for existing profiles, but we
-    still mkdir here as a belt-and-suspenders so the curator works even
-    from an odd entry path (e.g. gateway-only install, bare library use)
-    that bypasses both.
+    ``ensure_hermes_home()`` 在每次 CLI 启动时预先创建此目录，
+    并且 v22→v23 迁移为现有配置文件回填它，但我们仍然在这里 mkdir
+    作为腰带和吊带，以便策展器甚至可以从绕过这两者的奇怪入口路径
+    （例如：仅网关安装，裸库使用）工作。
     """
     root = get_hermes_home() / "logs" / "curator"
     try:
@@ -472,12 +455,12 @@ def _reports_root() -> Path:
 
 
 def _needle_in_path_component(needle: str, path: str) -> bool:
-    """Check if *needle* is a complete filename stem or directory name in *path*.
+    """
+    检查 *needle* 是否是 *path* 中的完整文件名词干或目录名。
 
-    Unlike simple substring matching, this avoids false positives where short
-    skill names are embedded in longer filenames (e.g. "api" matching
-    "references/api-design.md").  Hyphens and underscores are normalised so
-    "open-webui-setup" matches "open_webui_setup.md".
+    与简单的子字符串匹配不同，这避免了短技能名称嵌入在较长文件名中的误报
+    （例如："api" 匹配 "references/api-design.md"）。
+    连字符和下划线被规范化，以便 "open-webui-setup" 匹配 "open_webui_setup.md"。
     """
     norm_needle = needle.replace("-", "_")
     for part in path.replace("\\", "/").split("/"):
@@ -495,28 +478,24 @@ def _classify_removed_skills(
     after_names: Set[str],
     tool_calls: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Split ``removed`` into consolidated vs pruned.
+    """
+    将 ``removed`` 拆分为合并与修剪。
 
-    A removed skill is "consolidated" when the curator absorbed its content
-    into another skill (an umbrella) during this run — the content still
-    lives, just under a different name. A removed skill is "pruned" when the
-    curator archived it for staleness/irrelevance without preserving its
-    content elsewhere.
+    当策展器在此次运行中将其内容吸收到另一个技能（伞形）中时，删除的技能是"合并的"——
+    内容仍然存在，只是名称不同。
+    当策展器因过时而归档它而没有在其他地方保留其内容时，删除的技能是"修剪的"。
 
-    Heuristic: scan this run's ``skill_manage`` tool calls and look for
-    ``write_file``/``patch``/``create``/``edit`` actions whose target skill
-    (the ``name`` argument) is NOT the removed skill and whose
-    ``file_path`` / ``file_content`` / ``content`` arguments reference the
-    removed skill's name. That's the textbook "absorbed into umbrella"
-    signal. Ties are broken by first-match (earliest tool call wins).
+    启发式：扫描此次运行的 ``skill_manage`` 工具调用，并寻找其目标技能
+    （``name`` 参数）不是已删除技能且其 ``file_path``/``file_content``/``content``
+    参数引用已删除技能名称的 ``write_file``/``patch``/``create``/``edit`` 操作。
+    这是教科书式的"吸收到伞形"信号。平局通过首次匹配解决（最早的工具调用获胜）。
 
-    Returns ``{"consolidated": [{"name", "into", "evidence"}, ...],
-               "pruned":       [{"name"}, ...]}``.
+    返回 ``{"consolidated": [{"name", "into", "evidence"}, ...], "pruned": [{"name"}, ...]}``。
     """
     consolidated: List[Dict[str, Any]] = []
     pruned: List[Dict[str, Any]] = []
 
-    # Pre-parse tool calls: we only care about skill_manage.
+    # 预解析工具调用：我们只关心 skill_manage。
     parsed_calls: List[Dict[str, Any]] = []
     for tc in tool_calls or []:
         if not isinstance(tc, dict):
@@ -524,7 +503,7 @@ def _classify_removed_skills(
         if tc.get("name") != "skill_manage":
             continue
         raw = tc.get("arguments") or ""
-        # Arguments can be a JSON string (standard) or a dict (defensive).
+        # 参数可以是 JSON 字符串（标准）或字典（防御性）。
         args: Dict[str, Any] = {}
         if isinstance(raw, dict):
             args = raw
@@ -532,16 +511,14 @@ def _classify_removed_skills(
             try:
                 args = json.loads(raw)
             except Exception:
-                # Truncated or malformed — fall back to substring match on
-                # the raw string so we still catch the common case.
+                # 截断或格式错误——回退到原始字符串的子字符串匹配，以便我们仍然捕获常见情况。
                 args = {"_raw": raw}
         if not isinstance(args, dict):
             continue
         parsed_calls.append(args)
 
-    # Build a set of "destination" skill names: anything still present after
-    # the run plus anything newly added this run. A removed skill being
-    # referenced from one of these is the consolidation signal.
+    # 构建"目标"技能名称集合：此次运行后仍然存在的任何东西 + 此次运行中新添加的任何东西。
+    # 被删除的技能从其中一个被引用是合并信号。
     destinations = set(after_names) | set(added or [])
 
     for name in removed:
@@ -550,29 +527,25 @@ def _classify_removed_skills(
         into: Optional[str] = None
         evidence: Optional[str] = None
 
-        # Normalise name variants we'll search for in path/content strings.
+        # 规范化我们将在路径/内容字符串中搜索的名称变体。
         needles = {name, name.replace("-", "_"), name.replace("_", "-")}
 
         for args in parsed_calls:
             target = args.get("name")
             if not isinstance(target, str) or not target:
                 continue
-            # A call that operates on the removed skill itself isn't
-            # consolidation evidence.
+            # 对被删除技能本身进行操作的调用不是合并证据。
             if target == name:
                 continue
-            # The target must be a surviving or newly-created skill —
-            # otherwise we're pointing to a skill that doesn't exist.
+            # 目标必须是幸存或新创建的技能——否则我们指向一个不存在的技能。
             if target not in destinations:
                 continue
 
-            # Look for the removed skill's name in file_path / content / raw.
-            # Matching strategy differs by field type:
-            #   file_path — needle must be a complete path component
-            #     (filename stem or directory name), so "api" does NOT
-            #     falsely match "references/api-design.md".
-            #   content fields — word-boundary regex so "test" does NOT
-            #     falsely match "latest" or "testing".
+            # 在 file_path / content / raw 中寻找被删除技能的名称。
+            # 匹配策略因字段类型而异：
+            #   file_path——needle 必须是完整路径组件（文件名词干或目录名），
+            #     因此 "api" 不会错误匹配 "references/api-design.md"。
+            #   content 字段——单词边界正则表达式，因此 "test" 不会错误匹配 "latest" 或 "testing"。
             haystacks: List[tuple[str, str]] = []
             for key in ("file_path", "file_content", "content", "new_string", "_raw"):
                 v = args.get(key)
@@ -614,26 +587,25 @@ def _classify_removed_skills(
 def _parse_structured_summary(
     llm_final: str,
 ) -> Dict[str, List[Dict[str, str]]]:
-    """Extract the structured YAML block from the curator's final response.
+    """
+    从策展器的最终响应中提取结构化 YAML 块。
 
-    The curator prompt requires a fenced ```yaml block under
-    ``## Structured summary (required)`` with ``consolidations:`` and
-    ``prunings:`` lists. This parses it tolerantly:
+    策展器提示要求在 ``## 结构化摘要（必填）`` 下
+    有一个带围栏的 ```yaml 块，包含 ``consolidations:`` 和
+    ``prunings:`` 列表。这宽容地解析它：
 
-    - Missing block → returns empty lists (we'll fall back to heuristic).
-    - Malformed YAML → returns empty lists and we rely on heuristic.
-    - Partial block (e.g. only consolidations) → returns what we could parse.
+    - 缺少块→返回空列表（我们将回退到启发式）。
+    - 格式错误的 YAML→返回空列表并依赖启发式。
+    - 部分块（例如：只有 consolidations）→返回我们能解析的。
 
-    Returns ``{"consolidations": [{"from", "into", "reason"}, ...],
-               "prunings":       [{"name", "reason"}, ...]}``.
+    返回 ``{"consolidations": [{"from", "into", "reason"}, ...], "prunings": [{"name", "reason"}, ...]}``。
     """
     empty = {"consolidations": [], "prunings": []}
     if not llm_final or not isinstance(llm_final, str):
         return empty
 
-    # Find the YAML fenced block. We look for ```yaml ... ``` specifically
-    # rather than any fenced block so we don't accidentally pick up a code
-    # sample the model quoted elsewhere.
+    # 找到 YAML 带围栏的块。我们专门寻找 ```yaml ... ```，
+    # 而不是任何带围栏的块，这样我们就不会意外地选择模型在其他地方引用的代码样本。
     import re
     match = re.search(
         r"```ya?ml\s*\n(.*?)\n```",
@@ -645,8 +617,8 @@ def _parse_structured_summary(
 
     body = match.group(1)
 
-    # Prefer PyYAML when available — every hermes install already has it
-    # (config.yaml loader). Fall back to a hand parser for paranoia.
+    # 优先使用 PyYAML——每个 hermes 安装都已经有它（config.yaml 加载器）。
+    # 出于偏执回退到手写解析器。
     try:
         import yaml  # type: ignore
         data = yaml.safe_load(body)
@@ -695,21 +667,19 @@ def _parse_structured_summary(
 def _extract_absorbed_into_declarations(
     tool_calls: List[Dict[str, Any]],
 ) -> Dict[str, Dict[str, Any]]:
-    """Walk this run's tool calls and extract model-declared absorption targets.
+    """
+    遍历此次运行的工具调用并提取模型声明的吸收目标。
 
-    The curator prompt requires every ``skill_manage(action='delete')`` call
-    to pass ``absorbed_into=<umbrella>`` when consolidating, or
-    ``absorbed_into=""`` when truly pruning. This is the single authoritative
-    signal for classification — the model's own declaration at the moment of
-    deletion, which beats both post-hoc YAML summary parsing and substring
-    heuristics on other tool calls.
+    策展器提示要求每个 ``skill_manage(action='delete')`` 调用
+    在合并时传递 ``absorbed_into=<umbrella>``，或在真正修剪时传递 ``absorbed_into=""``。
+    这是分类的单一权威信号——模型在删除时的直接声明，
+    它胜过事后 YAML 摘要解析和其他工具调用上的子字符串启发式两者。
 
-    Returns ``{skill_name: {"into": "<umbrella>" | "", "declared": True}}``.
-    Entries with ``into == ""`` are explicit prunings.
-    Skills without a ``skill_manage(delete)`` call, or with one that omitted
-    ``absorbed_into``, are not in the returned dict — caller falls back to
-    the existing heuristic/YAML logic for those (backward compat with older
-    curator runs and any callers that don't populate the arg).
+    返回 ``{skill_name: {"into": "<umbrella>" | "", "declared": True}}``。
+    带有 ``into == ""`` 的条目是显式修剪。
+    没有 ``skill_manage(delete)`` 调用，或有但省略了 ``absorbed_into`` 的技能，
+    不在返回字典中——调用者回退到现有的启发式/YAML 逻辑处理那些
+    （与旧策展运行向后兼容以及任何未填充该参数的调用者）。
     """
     out: Dict[str, Dict[str, Any]] = {}
     for tc in tool_calls or []:
@@ -731,10 +701,9 @@ def _extract_absorbed_into_declarations(
         if args.get("action") != "delete":
             continue
         name = args.get("name")
-        if not isinstance(name, str) or not name.strip():
+        if not (isinstance(name, str) and name.strip()):
             continue
-        # absorbed_into must be present (even empty string is meaningful);
-        # missing key means the model didn't declare intent.
+        # absorbed_into 必须存在（即使空字符串也有意义）；缺少键意味着模型没有声明意图。
         if "absorbed_into" not in args:
             continue
         target = args.get("absorbed_into")
@@ -753,28 +722,24 @@ def _reconcile_classification(
     destinations: Set[str],
     absorbed_declarations: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Merge heuristic (tool-call evidence) with the model's structured block.
+    """
+    合并启发式（工具调用审计）与模型的结构化块。
 
-    Rules (evaluated in order; first match wins):
-    - **Model-declared `absorbed_into` at delete time is authoritative.** Any
-      entry in ``absorbed_declarations`` beats every other signal. This is
-      the model telling us directly, at the moment of deletion, what it did.
-      ``into != ""`` and target exists → consolidated. ``into == ""`` →
-      pruned. ``into != ""`` but target doesn't exist → hallucination; fall
-      through to the usual signals.
-    - Model-declared consolidation wins when its ``into`` target exists
-      in ``destinations`` (survived or newly-created). This gives the
-      model authority over intent + rationale.
-    - Model-declared consolidation whose ``into`` target does NOT exist is
-      downgraded: the model hallucinated an umbrella. We prefer the
-      heuristic's finding for that skill, or fall back to pruned.
-    - Heuristic-only finding (model didn't mention it, tool calls confirm)
-      is preserved as a consolidation, marked ``source="tool-call audit"``.
-    - Model-declared pruning is accepted unless the heuristic has
-      tool-call evidence that contradicts it (rare — the heuristic would
-      have flagged consolidation). In that case we log both.
+    规则（按顺序评估；首次匹配获胜）：
+    • **删除时模型声明的 absorbed_into 是权威的。**
+      ``absorbed_declarations`` 中的任何条目胜过所有其他信号。这是模型在删除时直接告诉我们它做了什么。
+      ``into != ""`` 并且目标存在→合并。``into == ""``→修剪。
+      ``into != ""`` 但目标不存在→幻觉；回退到通常信号。
+    • 当模型声明的合并的 ``into`` 目标存在于 ``destinations``（幸存或新创建）中时，该声明获胜。
+      这赋予模型对意图+理由的权威。
+    • 模型声明的合并的 ``into`` 目标不存在是降级：模型产生了伞形幻觉。
+      我们更喜欢该技能的启发式发现，或回退到修剪。
+    • 仅启发式发现（模型没有提到它，工具调用确认）被保留为合并，
+      标记为 ``source="tool-call audit"``。
+    • 模型声明的修剪被接受，除非启发式有工具调用证据反驳它（罕见——启发式会标记合并）。
+      在那种情况下，我们记录两者。
 
-    Every removed skill is placed in exactly one bucket.
+    每个删除的技能都被放置在恰好一个桶中。
     """
     heur_cons = {e["name"]: e for e in heuristic.get("consolidated", [])}
     heur_pruned = {e["name"] for e in heuristic.get("pruned", [])}
@@ -793,7 +758,7 @@ def _reconcile_classification(
         hc = heur_cons.get(name)
         dec = declared.get(name)
 
-        # Authoritative: model declared `absorbed_into` at the delete call.
+        # 权威：模型在删除调用时声明了 `absorbed_into`。
         if dec is not None:
             into_claim = dec.get("into", "")
             if into_claim and into_claim in destinations:
@@ -808,21 +773,19 @@ def _reconcile_classification(
                 consolidated.append(entry)
                 continue
             if into_claim == "":
-                # Explicit prune declaration
+                # 显式修剪声明
                 pruned.append({
                     "name": name,
-                    "source": "absorbed_into=\"\" (model-declared prune)",
+                    "source": "absorbed_into=\"\" (model-declared pruning)",
                     "reason": (mp.get("reason") or "") if mp else "",
                 })
                 continue
-            # into_claim is non-empty but target doesn't exist: the model
-            # named a nonexistent umbrella at delete time. The tool already
-            # rejects this at the skill_manage layer, so we shouldn't see it
-            # in practice — but if it slips through (e.g. the umbrella was
-            # deleted LATER in the same run), fall through to the usual
-            # signals rather than trusting a broken reference.
+            # into_claim 非空但目标不存在：模型在删除时命名了一个不存在的伞形。
+            # 工具已经在 skill_manage 层拒绝了这一点，所以我们在实践中应该看不到它——
+            # 但如果它通过（例如：伞形在同一运行稍后被删除），
+            # 回退到通常信号而不是信任一个坏引用。
 
-        # Model says consolidated — trust it if the destination is real.
+        # 模型说合并——如果目标真实则信任它。
         if mc and mc.get("into") in destinations:
             entry: Dict[str, Any] = {
                 "name": name,
@@ -835,8 +798,7 @@ def _reconcile_classification(
             consolidated.append(entry)
             continue
 
-        # Model says consolidated but the umbrella doesn't exist —
-        # hallucination. Fall back to heuristic or prune.
+        # 模型说合并但伞形不存在——幻觉。回退到启发式或修剪。
         if mc and mc.get("into") not in destinations:
             if hc:
                 consolidated.append({
@@ -855,7 +817,7 @@ def _reconcile_classification(
                 })
             continue
 
-        # Heuristic found consolidation the model didn't mention.
+        # 启发式找到了模型没有提到的合并。
         if hc:
             consolidated.append({
                 "name": name,
@@ -866,7 +828,7 @@ def _reconcile_classification(
             })
             continue
 
-        # Model says pruned (or no mention + no heuristic evidence).
+        # 模型说修剪（或没有提到 + 没有启发式证据）。
         reason = mp.get("reason", "") if mp else ""
         pruned.append({
             "name": name,
@@ -884,14 +846,14 @@ def _build_rename_summary(
     tool_calls: List[Dict[str, Any]],
     model_final: str,
 ) -> str:
-    """Format the user-visible rename map for a curator run.
+    """
+    为策展运行格式化用户可见的重命名映射。
 
-    Renders the "where did my skills go?" lines that get appended to the
-    `final_summary` string fed to gateway/CLI receivers. Empty string when
-    nothing was archived this run — most ticks are no-op and shouldn't add
-    extra log noise.
+    渲染"我的技能去哪里了？"行，这些行被附加到提供给网关/CLI 接收器的
+    ``final_summary`` 字符串。当此次运行没有归档任何内容时为空字符串——
+    大多数 tick 是空操作，不应该添加额外的日志噪声。
 
-    Format::
+    格式：
 
         archived 4 skill(s):
           • pdf-extraction → document-tools
@@ -901,10 +863,10 @@ def _build_rename_summary(
         full report: hermes curator status
         keep an umbrella stable: hermes curator pin document-tools
 
-    Cap is 10 entries so a 50-skill consolidation doesn't blow up
-    agent.log; the full list is always in REPORT.md. The pin hint only
-    appears when at least one consolidation produced an umbrella worth
-    pinning (pruned-only runs skip it).
+    上限为 10 个条目，这样 50 个技能的合并不会炸毁 agent.log；
+    完整列表始终在 REPORT.md 中。
+    仅当至少有一个合并产生了值得固定的伞形时，才会显示固定提示——
+    仅修剪的运行会跳过它。
     """
     after_by_name = {r.get("name"): r for r in after_report if isinstance(r, dict)}
     after_names = set(after_by_name.keys())
@@ -953,10 +915,8 @@ def _build_rename_summary(
     if total > SHOW:
         lines.append(f"  … and {total - SHOW} more")
     lines.append("full report: hermes curator status")
-    # Pin hint — only surface it when there's actually a destination skill
-    # worth pinning. The umbrella skills that absorbed content are the natural
-    # candidates: pinning one tells future curator runs to leave it alone.
-    # Pruned-only runs don't get this hint (nothing surviving to pin).
+    # 固定提示——仅当实际上有值得固定的目标技能时才显示它。吸收了内容的伞形技能是自然的候选：
+    # 固定一个告诉未来的策展运行不要管它。仅修剪的运行不会得到这个提示（没有幸存下来可以固定）。
     if consolidated:
         umbrellas = sorted({e.get("into") for e in consolidated if e.get("into")})
         if umbrellas:
@@ -978,21 +938,21 @@ def _write_run_report(
     after_report: List[Dict[str, Any]],
     llm_meta: Dict[str, Any],
 ) -> Optional[Path]:
-    """Write run.json + REPORT.md under logs/curator/{YYYYMMDD-HHMMSS}/.
+    """
+    在 logs/curator/{YYYYMMDD-HHMMSS}/ 下写入 run.json + REPORT.md。
 
-    Returns the report directory path on success, None if the write
-    couldn't happen (caller logs and continues — reporting is best-effort).
+    成功时返回报告目录路径，写入无法发生时返回 None（调用者记录并继续——报告是尽最大努力）。
     """
     root = _reports_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        logger.debug("Curator report dir create failed: %s", e)
+        logger.debug("Curator reports dir create failed: %s", e)
         return None
 
     stamp = started_at.strftime("%Y%m%d-%H%M%S")
     run_dir = root / stamp
-    # If we crash-reran within the same second, append a disambiguator
+    # 如果我们在同一秒内崩溃并重新运行，追加消歧器
     suffix = 1
     while run_dir.exists():
         suffix += 1
@@ -1003,14 +963,14 @@ def _write_run_report(
         logger.debug("Curator run dir create failed: %s", e)
         return None
 
-    # Diff before/after
+    # 之前/之后差异
     after_by_name = {r.get("name"): r for r in after_report if isinstance(r, dict)}
     after_names = set(after_by_name.keys())
-    removed = sorted(before_names - after_names)   # archived during this run
-    added = sorted(after_names - before_names)     # new skills this run
+    removed = sorted(before_names - after_names)  # 此次运行中归档
+    added = sorted(after_names - before_names)  # 此次运行中新技能
     before_by_name = {r.get("name"): r for r in before_report if isinstance(r, dict)}
 
-    # State transitions between the two snapshots (e.g. active -> stale)
+    # 两个快照之间的状态转换（例如：active → stale）
     transitions: List[Dict[str, str]] = []
     for name in sorted(after_names & before_names):
         s_before = (before_by_name.get(name) or {}).get("state")
@@ -1018,26 +978,22 @@ def _write_run_report(
         if s_before and s_after and s_before != s_after:
             transitions.append({"name": name, "from": s_before, "to": s_after})
 
-    # Classify LLM tool calls
+    # 分类 LLM 工具调用
     tc_counts: Dict[str, int] = {}
     for tc in llm_meta.get("tool_calls", []) or []:
         name = tc.get("name", "unknown")
         tc_counts[name] = tc_counts.get(name, 0) + 1
 
-    # Split "removed" into consolidated (absorbed into umbrella) vs pruned
-    # (archived for staleness, content not preserved elsewhere). The old
-    # "Skills archived" section lumped both together, which misled users
-    # into thinking consolidated skills had been pruned.
+    # 将"已删除"拆分为合并（吸收到伞形）与修剪（因过时而归档，内容未在其他地方保留）。
+    # 旧的"Skills archived"部分将两者混在一起，这误导了用户。
     #
-    # Classification strategy:
-    # 1. Parse the curator's structured YAML block from its final response.
-    #    The curator is now prompted to emit consolidations/prunings lists
-    #    with short rationale. The model has intent visibility the tool
-    #    calls don't.
-    # 2. Run the tool-call heuristic as a ground-truth audit.
-    # 3. Reconcile: model gets authority over intent + rationale, heuristic
-    #    catches hallucination (umbrella doesn't exist) and omission
-    #    (model forgot to list an actual consolidation).
+    # 分类策略：
+    # 1. 从策展器的最终响应中解析结构化 YAML 块。
+    #    策展器现在被提示发出带有简短理由的 consolidations/prunings 列表。
+    #    模型具有工具调用没有的意图可见性。
+    # 2. 运行工具调用启发式作为地面真相审计。
+    # 3. 协调：模型获得意图+理由的权威，启发式捕获幻觉（伞形不存在）和遗漏
+    #    （模型忘记列出实际合并）。
     heuristic = _classify_removed_skills(
         removed=removed,
         added=added,
@@ -1046,11 +1002,9 @@ def _write_run_report(
     )
     model_block = _parse_structured_summary(llm_meta.get("final", "") or "")
     destinations = set(after_names) | set(added or [])
-    # Authoritative signal: extract per-delete `absorbed_into` declarations
-    # from this run's tool calls. These beat both the YAML summary block and
-    # the substring heuristic — the model is telling us directly, at the
-    # moment of deletion, whether each archived skill was consolidated
-    # (into=<umbrella>) or pruned (into="").
+    # 权威信号：从此运行的工具调用中提取每个删除的 `absorbed_into` 声明。
+    # 这些胜过 YAML 摘要块和子字符串启发式两者——模型在删除时直接告诉我们，
+    # 每个归档的技能是被合并（into=<umbrella>）还是被修剪（into=""）。
     absorbed_declarations = _extract_absorbed_into_declarations(
         llm_meta.get("tool_calls", []) or []
     )
@@ -1064,13 +1018,10 @@ def _write_run_report(
     consolidated = classification["consolidated"]
     pruned = classification["pruned"]
 
-    # Rewrite cron job skill references. When the curator consolidates
-    # skill X into umbrella Y, any cron job that lists X fails to load
-    # it at run time — the scheduler skips it and the job runs without
-    # the instructions it was scheduled to follow. Rewriting the
-    # references in-place keeps scheduled jobs working across
-    # consolidation passes. Best-effort: never let a cron-module issue
-    # break the curator.
+    # 重写 cron 作业技能引用。当策展器将技能 X 合并到伞形 Y 时，
+    # 任何列出 X 的 cron 作业在运行时无法加载它——调度器跳过它，作业在没有计划跟随的指令下运行。
+    # 就地重写引用保持计划的作业在合并运行中继续工作。
+    # 尽最大努力：永远不要让 cron 模块问题破坏策展器。
     cron_rewrites: Dict[str, Any] = {"rewrites": [], "jobs_updated": 0, "jobs_scanned": 0}
     try:
         consolidated_map = {
@@ -1129,7 +1080,7 @@ def _write_run_report(
         "tool_calls": llm_meta.get("tool_calls", []),
     }
 
-    # run.json — machine-readable, full fidelity
+    # run.json——机器可读，完整保真度
     try:
         (run_dir / "run.json").write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
@@ -1138,15 +1089,14 @@ def _write_run_report(
     except Exception as e:
         logger.debug("Curator run.json write failed: %s", e)
 
-    # REPORT.md — human-readable
+    # REPORT.md——人类可读
     try:
         md = _render_report_markdown(payload)
         (run_dir / "REPORT.md").write_text(md, encoding="utf-8")
     except Exception as e:
         logger.debug("Curator REPORT.md write failed: %s", e)
 
-    # cron_rewrites.json — only when at least one job was touched, to
-    # keep run dirs uncluttered for the common no-op case.
+    # cron_rewrites.json——仅当至少一个作业被触碰时，以保持常见空操作情况的运行目录整洁。
     try:
         if int(cron_rewrites.get("jobs_updated", 0)) > 0:
             (run_dir / "cron_rewrites.json").write_text(
@@ -1160,61 +1110,57 @@ def _write_run_report(
 
 
 def _render_report_markdown(p: Dict[str, Any]) -> str:
-    """Render the human-readable report."""
+    """渲染人类可读的报告。"""
     lines: List[str] = []
     started = p.get("started_at", "")
     duration = p.get("duration_seconds", 0) or 0
     mins, secs = divmod(int(duration), 60)
     dur_label = f"{mins}m {secs}s" if mins else f"{secs}s"
 
-    lines.append(f"# Curator run — {started}\n")
-    model = p.get("model") or "(not resolved)"
-    prov = p.get("provider") or "(not resolved)"
+    lines.append(f"# 策展运行 — {started}\n")
+    model = p.get("model") or "(未解析)"
+    prov = p.get("provider") or "(未解析)"
     counts = p.get("counts") or {}
     lines.append(
-        f"Model: `{model}` via `{prov}`  ·  Duration: {dur_label}  ·  "
-        f"Agent-created skills: {counts.get('before', 0)} → {counts.get('after', 0)} "
+        f"模型：`{model}` 通过 `{prov}` · 持续时间：{dur_label} · "
+        f"代理创建的技能：{counts.get('before', 0)} → {counts.get('after', 0)} "
         f"({counts.get('delta', 0):+d})\n"
     )
 
     error = p.get("llm_error")
     if error:
-        lines.append(f"> ⚠ LLM pass error: `{error}`\n")
+        lines.append(f"> ⚠ LLM 通道错误：`{error}`\n")
 
-    # Auto-transitions (pure, no LLM)
+    # 自动转换（纯，无 LLM）
     auto = p.get("auto_transitions") or {}
-    lines.append("## Auto-transitions (pure, no LLM)\n")
-    lines.append(f"- checked: {auto.get('checked', 0)}")
-    lines.append(f"- marked stale: {auto.get('marked_stale', 0)}")
-    lines.append(f"- archived (no LLM, pure time-based staleness): {auto.get('archived', 0)}")
-    lines.append(f"- reactivated: {auto.get('reactivated', 0)}")
+    lines.append("## 自动转换（纯，无 LLM）\n")
+    lines.append(f"- 检查：{auto.get('checked', 0)}")
+    lines.append(f"- 标记过时：{auto.get('marked_stale', 0)}")
+    lines.append(f"- 归档（无 LLM，纯基于时间的过时）：{auto.get('archived', 0)}")
+    lines.append(f"- 重新激活：{auto.get('reactivated', 0)}")
     lines.append("")
 
-    # LLM pass numbers
+    # LLM 通道数字
     tc_counts = p.get("tool_call_counts") or {}
-    lines.append("## LLM consolidation pass\n")
-    lines.append(f"- tool calls: **{counts.get('tool_calls_total', 0)}** "
-                 f"(by name: {', '.join(f'{k}={v}' for k, v in sorted(tc_counts.items())) or 'none'})")
-    lines.append(f"- consolidated into umbrellas: **{counts.get('consolidated_this_run', 0)}**")
-    lines.append(f"- pruned (archived for staleness): **{counts.get('pruned_this_run', 0)}**")
-    lines.append(f"- new skills this run: **{counts.get('added_this_run', 0)}**")
-    lines.append(f"- state transitions (active ↔ stale ↔ archived): "
+    lines.append("## LLM 合并通道\n")
+    lines.append(f"- 工具调用：**{counts.get('tool_calls_total', 0)}** "
+                 f"(按名称：{', '.join(f'{k}={v}' for k, v in sorted(tc_counts.items())) or '无'})")
+    lines.append(f"- 合并到伞形：**{counts.get('consolidated_this_run', 0)}**")
+    lines.append(f"- 修剪（因过时而归档）：**{counts.get('pruned_this_run', 0)}**")
+    lines.append(f"- 此次运行新技能：**{counts.get('added_this_run', 0)}**")
+    lines.append(f"- 状态转换（active ↔ stale ↔ archived）："
                  f"**{counts.get('state_transitions', 0)}**")
     lines.append("")
 
-    # Consolidated list — content absorbed into an umbrella. The directory
-    # on disk still lives under ~/.hermes/skills/.archive/ (every removal is
-    # recoverable by design), but the "live" content for these skills
-    # continues to exist inside the destination umbrella.
+    # 合并列表——内容吸收到伞形中。磁盘上的目录仍然存在于 ~/.hermes/skills/.archive/ 下
+    #（每个删除都是设计可恢复的），但这些技能的"活"内容继续存在于目标伞形中。
     consolidated = p.get("consolidated") or []
     if consolidated:
-        lines.append(f"### Consolidated into umbrella skills ({len(consolidated)})\n")
+        lines.append(f"### 合并到伞形技能（{len(consolidated)}）\n")
         lines.append(
-            "_These skills were **absorbed into another skill** during this run — "
-            "their content still lives, just under a different name. "
-            "The original directory was moved to `~/.hermes/skills/.archive/` for "
-            "safety and can be restored via `hermes curator restore <name>` if the "
-            "consolidation was wrong._\n"
+            "这些技能在此次运行中**被吸收到另一个技能**——它们的内容仍然存在，只是名称不同。"
+            "原始目录已移动到 `~/.hermes/skills/.archive/` 以确保安全，"
+            "并且如果合并错误，可以通过 `hermes curator restore <name>` 恢复。\n"
         )
         SHOW = 50
         for entry in consolidated[:SHOW]:
@@ -1222,40 +1168,35 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
             into = entry.get("into", "?")
             reason = (entry.get("reason") or "").strip()
             source = entry.get("source", "")
-            line = f"- `{name}` → merged into `{into}`"
+            line = f"- `{name}` → 合并到 `{into}`"
             if reason:
                 line += f" — {reason}"
             if source and source.startswith("tool-call audit"):
-                # The model didn't enumerate this one — surface that to the
-                # user so they know why the row has no rationale.
-                line += f"  _(detected via {source})_"
+                # 模型没有枚举这个——向用户展示，以便他们知道为什么该行没有理由。
+                line += f"  _(通过 {source} 检测)_"
             lines.append(line)
             if entry.get("model_claimed_into"):
                 lines.append(
-                    f"  ⚠ The curator's summary named `{entry['model_claimed_into']}` "
-                    "as the umbrella but that skill doesn't exist post-run; "
-                    "showing the tool-call audit's finding instead."
+                    f"  ⚠ 策展器的摘要将 `{entry['model_claimed_into']}` 命名为伞形，"
+                    "但该技能在运行后不存在；显示工具调用审计的发现。"
                 )
         if len(consolidated) > SHOW:
-            lines.append(f"- … and {len(consolidated) - SHOW} more (see `run.json`)")
+            lines.append(f"- … 还有 {len(consolidated) - SHOW} 个（参见 `run.json`）")
         lines.append("")
 
-    # Pruned list — archived without consolidation. These are the
-    # "stale skill pruned" cases the UI should mark clearly.
+    # 修剪列表——归档而无合并。这些是 UI 应该清楚标记的"过时技能修剪"情况。
     pruned = p.get("pruned") or []
     if pruned:
-        lines.append(f"### Pruned — archived for staleness ({len(pruned)})\n")
+        lines.append(f"### 修剪——因过时而归档（{len(pruned)}）\n")
         lines.append(
-            "_These skills were archived without being merged into an umbrella "
-            "(e.g. stale, unused, or judged irrelevant). "
-            "Directories live under `~/.hermes/skills/.archive/`. "
-            "Restore any via `hermes curator restore <name>`._\n"
+            "这些技能在没有合并到伞形的情况下被归档（例如：过时、未使用或被判定为不相关）。"
+            "目录位于 `~/.hermes/skills/.archive/` 下。"
+            "通过 `hermes curator restore <name>` 恢复任何一个。\n"
         )
         SHOW = 50
         for entry in pruned[:SHOW]:
-            # Entries are dicts with {name, source, reason} when written via
-            # the reconciler, or bare strings when an older format slipped
-            # through. Handle both.
+            # 条目在通过协调器写入时是带有 {name, source, reason} 的字典，
+            # 或者在旧格式滑过时是纯字符串。处理两者。
             if isinstance(entry, dict):
                 name = entry.get("name", "?")
                 reason = (entry.get("reason") or "").strip()
@@ -1266,37 +1207,35 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
             else:
                 lines.append(f"- `{entry}`")
         if len(pruned) > SHOW:
-            lines.append(f"- … and {len(pruned) - SHOW} more (see `run.json`)")
+            lines.append(f"- … 还有 {len(pruned) - SHOW} 个（参见 `run.json`）")
         lines.append("")
 
-    # Added list
+    # 添加列表
     added = p.get("added") or []
     if added:
-        lines.append(f"### New skills this run ({len(added)})\n")
-        lines.append("_Usually these are new class-level umbrellas created via `skill_manage action=create`._\n")
+        lines.append(f"### 此次运行新技能（{len(added)}）\n")
+        lines.append("通常这些是通过 `skill_manage action=create` 创建的新类级伞形。\n")
         for n in added:
             lines.append(f"- `{n}`")
         lines.append("")
 
-    # State transitions
+    # 状态转换
     trans = p.get("state_transitions") or []
     if trans:
-        lines.append(f"### State transitions ({len(trans)})\n")
+        lines.append(f"### 状态转换（{len(trans)}）\n")
         for t in trans:
             lines.append(f"- `{t.get('name')}`: {t.get('from')} → {t.get('to')}")
         lines.append("")
 
-    # Cron job rewrites — show which scheduled jobs had their skill
-    # references updated so users can audit that the auto-rewrite did
-    # the right thing. Only present when at least one job changed.
+    # Cron 作业重写——显示哪些计划的作业的技能引用被更新，以便用户可以审计自动重写做了正确的事情。
+    # 仅在至少一个作业改变时出现。
     cron_rw = p.get("cron_rewrites") or {}
     cron_rewrites_list = cron_rw.get("rewrites") or []
     if cron_rewrites_list:
-        lines.append(f"### Cron job skill references rewritten ({len(cron_rewrites_list)})\n")
+        lines.append(f"### Cron 作业技能引用重写（{len(cron_rewrites_list)}）\n")
         lines.append(
-            "_Cron jobs that referenced a consolidated or pruned skill were "
-            "updated in-place so they keep loading the right instructions "
-            "on their next run. See `cron_rewrites.json` for the full record._\n"
+            "引用已合并或修剪技能的 Cron 作业被就地更新，以便它们在下次运行时继续加载正确的指令。"
+            "完整记录参见 `cron_rewrites.json`。\n"
         )
         SHOW = 25
         for entry in cron_rewrites_list[:SHOW]:
@@ -1306,52 +1245,52 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
             mapped = entry.get("mapped") or {}
             dropped = entry.get("dropped") or []
             lines.append(
-                f"- `{job_name}`: `{', '.join(before)}` → `{', '.join(after) or '(none)'}`"
+                f"- `{job_name}`: `{', '.join(before)}` → `{', '.join(after) or '(无)'}`"
             )
             for old, new in mapped.items():
-                lines.append(f"    - `{old}` → `{new}` (consolidated)")
+                lines.append(f"    - `{old}` → `{new}`（已合并）")
             for name in dropped:
-                lines.append(f"    - `{name}` dropped (pruned)")
-        if len(cron_rewrites_list) > SHOW:
+                lines.append(f"    - `{name}` 已删除（已修剪）")
+        if len(cron_rewrites_list) > SHOW):
             lines.append(
-                f"- … and {len(cron_rewrites_list) - SHOW} more "
-                "(see `cron_rewrites.json`)"
+                f"- … 还有 {len(cron_rewrites_list) - SHOW} 个"
+                "（参见 `cron_rewrites.json`）"
             )
         lines.append("")
 
-    # Full LLM final response
+    # 完整的 LLM 最终响应
     final = (p.get("llm_final") or "").strip()
     if final:
-        lines.append("## LLM final summary\n")
+        lines.append("## LLM 最终摘要\n")
         lines.append(final)
         lines.append("")
     elif not error:
         llm_sum = p.get("llm_summary") or ""
         if llm_sum:
-            lines.append("## LLM summary\n")
+            lines.append("## LLM 摘要\n")
             lines.append(llm_sum)
             lines.append("")
 
-    # Recovery footer
-    lines.append("## Recovery\n")
-    lines.append("- Restore an archived skill: `hermes curator restore <name>`")
-    lines.append("- All archives live under `~/.hermes/skills/.archive/` and are recoverable by `mv`")
-    lines.append("- See `run.json` in this directory for the full machine-readable record.")
+    # 恢复页脚
+    lines.append("## 恢复\n")
+    lines.append("- 恢复已归档的技能：`hermes curator restore <name>`")
+    lines.append("- 所有归档都位于 `~/.hermes/skills/.archive/` 下，并且可以通过 `mv` 恢复")
+    lines.append("- 完整的机器可读记录参见此目录中的 `run.json`。")
     lines.append("")
 
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator — spawn a forked AIAgent for the LLM review pass
+# 协调器——派生出分叉的 AIAgent 用于 LLM 审查通道
 # ---------------------------------------------------------------------------
 
 def _render_candidate_list() -> str:
-    """Human/agent-readable list of agent-created skills with usage stats."""
+    """人类/代理可读的具有使用统计的代理创建技能列表。"""
     rows = skill_usage.agent_created_report()
     if not rows:
-        return "No agent-created skills to review."
-    lines = [f"Agent-created skills ({len(rows)}):\n"]
+        return "没有要审查的代理创建技能。"
+    lines = [f"代理创建的技能（{len(rows)}）：\n"]
     for r in rows:
         lines.append(
             f"- {r['name']}  "
@@ -1371,27 +1310,25 @@ def run_curator_review(
     synchronous: bool = False,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Execute a single curator review pass.
+    """
+    执行单次策展审查通道。
 
-    Steps:
-      1. Apply automatic state transitions (pure, no LLM).
-      2. If there are agent-created skills, spawn a forked AIAgent that runs
-         the LLM review prompt against the current candidate list.
-      3. Update .curator_state with last_run_at and a one-line summary.
-      4. Invoke *on_summary* with a user-visible description.
+    步骤：
+      1. 应用自动状态转换（纯，无 LLM）。
+      2. 如果有代理创建的技能，派生出分叉的 AIAgent，它对当前候选列表运行 LLM 审查提示。
+      3. 使用 last_run_at 和单行摘要更新 .curator_state。
+      4. 使用用户可见的描述调用 *on_summary*。
 
-    If *synchronous* is True, the LLM review runs in the calling thread; the
-    default is to spawn a daemon thread so the caller returns immediately.
+    如果 *synchronous* 为 True，LLM 审查在调用线程中运行；默认是派生出守护线程，以便调用者立即返回。
 
-    If *dry_run* is True, the automatic stale/archive transitions are SKIPPED
-    and the LLM review pass is instructed to produce a report only — no
-    skill_manage mutations, no terminal archive moves. The REPORT.md still
-    gets written and ``state.last_report_path`` still records it so users
-    can read what the curator WOULD have done.
+    如果 *dry_run* 为 True，自动过时/归档转换被跳过，
+    并且 LLM 审查通道被指示仅生成报告——
+    没有 skill_manage 变更，没有 terminal 归档移动。REPORT.md 仍然被写入，
+    并且 ``state.last_report_path`` 仍然记录它，以便用户可以阅读策展器会做什么。
     """
     start = datetime.now(timezone.utc)
     if dry_run:
-        # Count candidates without mutating state.
+        # 计数候选而不改变状态。
         try:
             report = skill_usage.agent_created_report()
             counts = {
@@ -1403,11 +1340,9 @@ def run_curator_review(
         except Exception:
             counts = {"checked": 0, "marked_stale": 0, "archived": 0, "reactivated": 0}
     else:
-        # Pre-mutation snapshot — best-effort, never blocks the run. A
-        # failed snapshot logs at debug and continues (the alternative is
-        # that a transient disk issue silently disables curator forever,
-        # which is worse). Users who want to require snapshots can disable
-        # curator entirely until they can fix disk space.
+        # 变更前快照——尽最大努力，永远不阻塞运行。
+        # 失败的快照在调试级别记录并继续（替代方案是瞬态磁盘问题静默永久禁用策展器，这更糟）。
+        # 希望快照的用户可以在修复磁盘空间之前完全禁用策展器。
         try:
             from agent import curator_backup
             snap = curator_backup.snapshot_skills(reason="pre-curator-run")
@@ -1429,11 +1364,9 @@ def run_curator_review(
         auto_summary_parts.append(f"{counts['reactivated']} reactivated")
     auto_summary = ", ".join(auto_summary_parts) if auto_summary_parts else "no changes"
 
-    # Persist state before the LLM pass so a crash mid-review still records
-    # the run and doesn't immediately re-trigger. In dry-run we do NOT bump
-    # last_run_at or run_count — a preview shouldn't push the next scheduled
-    # real pass out. We still record a summary so `hermes curator status`
-    # shows that a preview ran.
+    # 在 LLM 通道之前持久化状态，以便在审查中途崩溃仍然记录运行并且不会立即重新触发。
+    # 在空运行中，我们不增加 last_run_at 或 run_count——预览不应该将下一次计划的真实运行推远。
+    # 我们仍然记录摘要，以便 `hermes curator status` 显示预览已运行。
     state = load_state()
     if not dry_run:
         state["last_run_at"] = start.isoformat()
@@ -1444,7 +1377,7 @@ def run_curator_review(
 
     def _llm_pass():
         nonlocal auto_summary
-        # Snapshot skill state BEFORE the LLM pass so the report can diff.
+        # LLM 通道之前的技能状态快照，以便报告可以差异。
         try:
             before_report = skill_usage.agent_created_report()
         except Exception:
@@ -1454,7 +1387,7 @@ def run_curator_review(
         llm_meta: Dict[str, Any] = {}
         try:
             candidate_list = _render_candidate_list()
-            if "No agent-created skills" in candidate_list:
+            if "没有要审查的代理创建技能" in candidate_list:
                 final_summary = f"{prefix}{auto_summary}; llm: skipped (no candidates)"
                 llm_meta = {
                     "final": "",
@@ -1489,10 +1422,9 @@ def run_curator_review(
                 "error": str(e),
             }
 
-        # Append the rename map (`old-name → umbrella`) to the user-visible
-        # summary so people don't have to dig into REPORT.md to find out where
-        # their skills went. Best-effort: classification is pure but never
-        # block the run on a formatting issue.
+        # 将重命名映射（`old-name → umbrella`）附加到用户可见摘要，
+        # 以便人们不必深入 REPORT.md 就能发现他们的技能去了哪里。
+        # 尽最大努力：分类是纯的，但永远不要在格式化问题上阻塞运行。
         try:
             rename_lines = _build_rename_summary(
                 before_names=before_names,
@@ -1510,9 +1442,8 @@ def run_curator_review(
         state2["last_run_duration_seconds"] = elapsed
         state2["last_run_summary"] = final_summary
 
-        # Write the per-run report. Runs in a best-effort try so a
-        # reporting bug never breaks the curator itself. Report path is
-        # recorded in state so `hermes curator status` can point at it.
+        # 写入每次运行的报告。在 try 中运行，以便报告错误永远不会破坏策展器本身。
+        # 报告路径记录在状态中，以便 `hermes curator status` 可以指向它。
         try:
             after_report = skill_usage.agent_created_report()
         except Exception:
@@ -1555,18 +1486,17 @@ def run_curator_review(
 
 
 def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
-    """Resolve provider/model and per-slot credentials for the curator review fork.
+    """
+    解析策展审查分叉的提供商/模型和每个槽覆盖。
 
-    Same precedence as `_resolve_review_model()`. Non-empty ``api_key`` /
-    ``base_url`` from the active slot are returned as explicit overrides so
-    ``resolve_runtime_provider`` does not silently reuse the main chat
-    credential chain for a routed auxiliary model.
+    与 `_resolve_review_model()` 优先级相同。来自活动槽的非空 ``api_key``/``base_url``
+    作为显式覆盖返回，以便 `resolve_runtime_provider` 不会为路由的辅助模型静默重用主聊天凭据链。
     """
     _main = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
     _main_provider = _main.get("provider") or "auto"
     _main_model = _main.get("default") or _main.get("model") or ""
 
-    # 1. Canonical aux task slot
+    # 1. 规范辅助任务槽
     _aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
     _cur_task = _aux.get("curator", {}) if isinstance(_aux.get("curator"), dict) else {}
     _task_provider = (_cur_task.get("provider") or "").strip() or None
@@ -1579,7 +1509,7 @@ def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
             _strip_aux_credential(_cur_task.get("base_url")),
         )
 
-    # 2. Legacy curator.auxiliary.{provider,model} (deprecated, pre-unification)
+    # 2. 旧版 curator.auxiliary.{provider,model}（已弃用，统一前）
     _cur = cfg.get("curator", {}) if isinstance(cfg.get("curator"), dict) else {}
     _legacy = _cur.get("auxiliary", {}) if isinstance(_cur.get("auxiliary"), dict) else {}
     _legacy_provider = _legacy.get("provider") or None
@@ -1596,41 +1526,41 @@ def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
             _strip_aux_credential(_legacy.get("base_url")),
         )
 
-    # 3. Fall through to the main chat model
+    # 3. 回退到主聊天模型
     return _ReviewRuntimeBinding(_main_provider, _main_model, None, None)
 
 
 def _resolve_review_model(cfg: Dict[str, Any]) -> tuple[str, str]:
-    """Pick (provider, model) for the curator review fork.
+    """
+    选择策展审查分叉的（provider, model）。
 
-    Curator is a regular auxiliary task slot — ``auxiliary.curator.{provider,model}``
-    — so it participates in the canonical aux-model plumbing (``hermes model`` →
-    auxiliary picker, the dashboard Models tab, ``auxiliary.curator.{timeout,
-    base_url,api_key,extra_body}``). ``provider: "auto"`` with an empty model
-    means "use the main chat model" — same default as every other aux task.
+    策展器是常规的辅助任务槽——``auxiliary.curator.{provider,model}``——
+    所以它参与规范的辅助模型管道（``hermes model`` → 辅助选择器，
+    仪表板模型选项卡，``auxiliary.curator.{timeout,base_url,api_key,extra_body}``）。
+    带有空模型的 ``provider: "auto"`` 意味着"使用主聊天模型"——与每个其他辅助任务相同的默认值。
 
-    Legacy fallback: users who configured ``curator.auxiliary.{provider,model}``
-    under the previous one-off schema still work. Precedence:
-      1. ``auxiliary.curator.{provider,model}`` when both are set non-auto
-      2. Legacy ``curator.auxiliary.{provider,model}`` when both are set
-      3. Main ``model.{provider,default/model}`` pair
+    旧版回退：在之前的一次性方案下配置 ``curator.auxiliary.{provider,model}`` 的用户仍然可以工作。
+    优先级：
+      1. 当两者都设置为非 auto 时为 ``auxiliary.curator.{provider,model}``
+      2. 当两者都设置时为旧版 ``curator.auxiliary.{provider,model}``
+      3. 主 ``model.{provider,default/model}`` 对
     """
     b = _resolve_review_runtime(cfg)
     return b.provider, b.model
 
 
 def _run_llm_review(prompt: str) -> Dict[str, Any]:
-    """Spawn an AIAgent fork to run the curator review prompt.
+    """
+    派生出 AIAgent 分叉来运行策展审查提示。
 
-    Returns a dict with:
-      - final: full (untruncated) final response from the reviewer
-      - summary: short summary suitable for state file (240-char cap)
-      - model, provider: what the fork actually ran on
-      - tool_calls: list of {name, arguments} for every tool call made during
-        the pass (arguments may be truncated for readability)
-      - error: set if the pass failed mid-run; final/summary may still be empty
+    返回包含以下内容的字典：
+      - final: 来自审阅者的完整（未截断）最终响应
+      - summary: 适合状态文件的简短摘要（240 字符上限）
+      - model, provider: 分叉实际运行在什么上
+      - tool_calls: 此次通道期间进行的每个工具调用的 {name, arguments} 列表（参数可能为可读性截断）
+      - error: 通道中途失败时设置；final/summary 仍然可能为空
 
-    Never raises; callers get a structured failure instead.
+    永远不抛出；调用者得到结构化失败。
     """
     import contextlib
     result_meta: Dict[str, Any] = {
@@ -1648,17 +1578,14 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         result_meta["summary"] = result_meta["error"]
         return result_meta
 
-    # Resolve provider + model the same way the CLI does, so the curator
-    # fork inherits the user's active main config rather than falling
-    # through to an empty provider/model pair (which sends HTTP 400
-    # "No models provided"). AIAgent() without explicit provider/model
-    # arguments hits an auto-resolution path that fails for OAuth-only
-    # providers and for pool-backed credentials.
+    # 以与 CLI 完全相同的方式解析 provider + model，以便策展器分叉继承用户的活动主配置，
+    # 而不是回退到空的 provider/model 对（这发送 HTTP 400 "No models provided"）。
+    # 没有显式 provider/model 参数的 AIAgent() 会命中一个自动解析路径，该路径对于 OAuth 唯一提供程序和池支持凭据失败。
     #
-    # `_resolve_review_runtime()` honors `auxiliary.curator.{provider,model,...}`
-    # (canonical aux-task slot, wired through `hermes model` → auxiliary
-    # picker and the dashboard Models tab), with a legacy fallback to
-    # `curator.auxiliary.{provider,model,...}`. See docs/user-guide/features/curator.md.
+    # `_resolve_review_runtime()` 尊重 `auxiliary.curator.{provider,model,...}`
+    #（规范辅助任务槽，连接到 `hermes model` → 辅助选择器和仪表板模型选项卡），
+    # 旧版回退到 `curator.auxiliary.{provider,model,...}`。
+    # 参见 docs/user-guide/features/curator.md。
     _api_key = None
     _base_url = None
     _api_mode = None
@@ -1694,26 +1621,23 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
             api_key=_api_key,
             base_url=_base_url,
             api_mode=_api_mode,
-            # Umbrella-building over a large skill collection is worth a
-            # high iteration ceiling — the pass typically takes 50-100
-            # API calls against hundreds of candidate skills. The
-            # single-session review path caps itself at a much smaller
-            # number because it's not doing a curation sweep.
+            # 在大型技能库上构建伞形值得高迭代上限——
+            # 该通道通常在数百个候选技能上需要 50-100 个 API 调用。
+            # 单会话审查路径在更小的数量上限自己，因为它不做策展清扫。
             max_iterations=9999,
             quiet_mode=True,
             platform="curator",
             skip_context_files=True,
             skip_memory=True,
         )
-        # Disable recursive nudges — the curator must never spawn its own review.
+        # 禁用递归微调——策展器绝不能派生出自己的审查。
         review_agent._memory_nudge_interval = 0
         review_agent._skill_nudge_interval = 0
 
-        # Redirect the forked agent's stdout/stderr to /dev/null while it
-        # runs so its tool-call chatter doesn't pollute the foreground
-        # terminal. The background-thread runner also hides it; this
-        # belt-and-suspenders path matters when a caller invokes
-        # run_curator_review(synchronous=True) from the CLI.
+        # 在运行时将分叉代理的 stdout/stderr 重定向到 /dev/null，
+        # 以便它的工具调用聊天不会污染前台终端。
+        # 后台线程运行器也隐藏它；当调用者从 CLI 同步调用 `run_curator_review()` 时，
+        # 这条腰带和吊带路径很重要。
         with open(os.devnull, "w", encoding="utf-8") as _devnull, \
              contextlib.redirect_stdout(_devnull), \
              contextlib.redirect_stderr(_devnull):
@@ -1725,10 +1649,8 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         result_meta["final"] = final
         result_meta["summary"] = (final[:240] + "…") if len(final) > 240 else (final or "no change")
 
-        # Collect tool calls for the report. Walk the forked agent's
-        # session messages and extract every tool_call made during the
-        # pass. Truncate argument payloads so a giant skill_manage create
-        # doesn't blow up the report.
+        # 收集报告的工具调用。遍历分叉代理的会话消息并提取此次通道期间进行的每个 tool_call。
+        # 截断参数有效负载，以便巨大的 skill_manage create 不会炸毁报告。
         _calls: List[Dict[str, Any]] = []
         for msg in getattr(review_agent, "_session_messages", []) or []:
             if not isinstance(msg, dict):
@@ -1757,7 +1679,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Public entrypoint for the session-start hook
+# 会话开始钩子的公共入口点
 # ---------------------------------------------------------------------------
 
 def maybe_run_curator(
@@ -1765,12 +1687,14 @@ def maybe_run_curator(
     idle_for_seconds: Optional[float] = None,
     on_summary: Optional[Callable[[str], None]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Best-effort: run a curator pass if all gates pass. Returns the result
-    dict if a pass was started, else None. Never raises."""
+    """
+    尽最大努力：如果所有门槛都通过，则运行策展通道。如果开始运行则返回结果字典，否则返回 None。
+    永远不抛出。
+    """
     try:
         if not should_run_now():
             return None
-        # Idle gating: only enforce when the caller provided a measurement.
+        # 空闲门槛：仅当调用者提供测量时才强制执行。
         if idle_for_seconds is not None:
             min_idle_s = get_min_idle_hours() * 3600.0
             if idle_for_seconds < min_idle_s:
